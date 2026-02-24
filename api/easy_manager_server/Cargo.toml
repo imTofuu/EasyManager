@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+easy_manager_core = { path = "../easy_manager_core" }
+axum = { version = "0.8.8", features = ["macros"] }
+tokio = { version = "1.49.0", features = ["rt-multi-thread"] }
+tracing = "0.1.44"
+tracing-appender = "0.2.4"
+tracing-subscriber = "0.3.22"
+serde_json = "1.0.149"
