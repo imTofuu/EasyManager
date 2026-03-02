@@ -59,10 +59,17 @@ async fn get_device_info() -> (
 	)
 }
 
+async fn ping() -> axum::http::StatusCode {
+	axum::http::StatusCode::OK
+}
+
 async fn packet_validation_middleware(
 	req: axum::http::Request<axum::body::Body>,
 	next: axum::middleware::Next,
 ) -> axum::http::Response<axum::body::Body> {
+	if req.uri() == "/ping" {
+		return next.run(req).await
+	}
 	match easy_manager_core::packets::validate_packet(req.headers()) {
 		Ok(_) => next.run(req).await,
 		Err(err) => match err {
@@ -94,7 +101,7 @@ async fn generate_session(user_id: u64) -> u64 {
 enum EasyManagerError {
 	SocketError(io::Error),
 	DatabaseError(sea_orm::DbErr),
-	HTTPError(io::Error)
+	HTTPError(io::Error),
 }
 
 #[tracing::instrument]
@@ -104,6 +111,7 @@ async fn main() -> Result<(), EasyManagerError> {
 
 	let router: axum::Router = axum::Router::new()
 		.route("/", axum::routing::method_routing::get(get_device_info))
+		.route("/ping", axum::routing::method_routing::get(ping))
 		.layer(axum::middleware::from_fn(packet_validation_middleware));
 
 	let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
@@ -121,17 +129,17 @@ async fn main() -> Result<(), EasyManagerError> {
 				EasyManagerError::DatabaseError(err)
 			})?;
 
-	migration::Migrator::up(&db_connection, None).await.map_err(|err| {
-		tracing::error!(%err, "Failed to make migration on database");
-		EasyManagerError::DatabaseError(err)
-	})?;
+	migration::Migrator::up(&db_connection, None)
+		.await
+		.map_err(|err| {
+			tracing::error!(%err, "Failed to make migration on database");
+			EasyManagerError::DatabaseError(err)
+		})?;
 
 	tracing::info!("Listening on 3000");
 
-	axum::serve(listener, router)
-		.await
-		.map_err(|err| {
-			tracing::error!(%err);
-			EasyManagerError::HTTPError(err)
-		})
+	axum::serve(listener, router).await.map_err(|err| {
+		tracing::error!(%err);
+		EasyManagerError::HTTPError(err)
+	})
 }
