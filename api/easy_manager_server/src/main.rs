@@ -1,3 +1,5 @@
+mod entity;
+
 use axum::response::IntoResponse;
 use easy_manager_core::packets::PacketError;
 use migration::MigratorTrait;
@@ -68,7 +70,7 @@ async fn packet_validation_middleware(
 	next: axum::middleware::Next,
 ) -> axum::http::Response<axum::body::Body> {
 	if req.uri() == "/ping" {
-		return next.run(req).await
+		return next.run(req).await;
 	}
 	match easy_manager_core::packets::validate_packet(req.headers()) {
 		Ok(_) => next.run(req).await,

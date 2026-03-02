@@ -1,15 +1,16 @@
-use sea_orm_migration::prelude::*;
+use sea_orm_migration::{prelude::*, schema::*};
+use crate::m20220101_000001_create_users::User;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
 #[derive(Iden)]
-pub enum User {
+enum Session {
 	Table,
+	SessionId,
 	UserId,
-	Username,
-	PasswordHash,
 	CreatedAt,
+	Expired,
 }
 
 #[async_trait::async_trait]
@@ -18,22 +19,22 @@ impl MigrationTrait for Migration {
 		manager
 			.create_table(
 				Table::create()
-					.table(User::Table)
+					.table(Session::Table)
 					.if_not_exists()
-					.col(ColumnDef::new(User::UserId).uuid().primary_key().not_null())
 					.col(
-						ColumnDef::new(User::Username)
-							.string()
-							.unique_key()
+						ColumnDef::new(Session::SessionId)
+							.uuid()
+							.primary_key()
 							.not_null(),
 					)
-					.col(ColumnDef::new(User::PasswordHash).string().not_null())
+					.col(ColumnDef::new(Session::UserId).uuid().not_null())
 					.col(
-						ColumnDef::new(User::CreatedAt)
+						ColumnDef::new(Session::CreatedAt)
 							.timestamp_with_time_zone()
 							.default(Expr::current_timestamp())
 							.not_null(),
 					)
+					.foreign_key(ForeignKey::create().name("fk-session-userid").from(Session::Table, Session::UserId).to(User::Table, User::UserId))
 					.to_owned(),
 			)
 			.await
@@ -41,7 +42,7 @@ impl MigrationTrait for Migration {
 
 	async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
 		manager
-			.drop_table(Table::drop().table(User::Table).to_owned())
+			.drop_table(Table::drop().table(Session::Table).to_owned())
 			.await
 	}
 }
