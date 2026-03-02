@@ -1,5 +1,7 @@
 use axum::response::IntoResponse;
 use easy_manager_core::packets::PacketError;
+use migration::MigratorTrait;
+use std::io;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -11,7 +13,7 @@ fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
 	exe_path.pop();
 
 	let (file_writer, file_guard) = tracing_appender::non_blocking(
-		tracing_appender::rolling::daily(exe_path.join("logs"), "easy_manager_server")
+		tracing_appender::rolling::daily(exe_path.join("logs"), "easy_manager_server"),
 	);
 
 	let file_layer = tracing_subscriber::fmt::layer()
@@ -23,7 +25,7 @@ fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
 				tracing::Level::DEBUG
 			} else {
 				tracing::Level::INFO
-			}
+			},
 		));
 
 	let cout_layer = tracing_subscriber::fmt::layer()
@@ -34,7 +36,7 @@ fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
 				tracing::Level::DEBUG
 			} else {
 				tracing::Level::INFO
-			})
+			}),
 		));
 
 	tracing_subscriber::Registry::default()
@@ -49,67 +51,87 @@ fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
 
 async fn get_device_info() -> (
 	axum::http::StatusCode,
-	axum::Json<easy_manager_core::packets::get::DeviceInfo>
+	axum::Json<easy_manager_core::packets::get::DeviceInfo>,
 ) {
 	(
 		axum::http::StatusCode::OK,
-		axum::Json(easy_manager_core::packets::get::DeviceInfo {})
+		axum::Json(easy_manager_core::packets::get::DeviceInfo {}),
 	)
 }
 
 async fn packet_validation_middleware(
 	req: axum::http::Request<axum::body::Body>,
-	next: axum::middleware::Next
+	next: axum::middleware::Next,
 ) -> axum::http::Response<axum::body::Body> {
 	match easy_manager_core::packets::validate_packet(req.headers()) {
 		Ok(_) => next.run(req).await,
-		Err(err) => {
-			match err {
-				PacketError::MissingHeaderError(header_name) => {
-					(
-						axum::http::StatusCode::BAD_REQUEST,
-						axum::Json(serde_json::json!({
-							"message": "Header missing from packet.",
-							"header_name": header_name.as_str()
-						}))
-					)
-						.into_response()
-				}
-				PacketError::InvalidVersion(_) => {
-					(
-						axum::http::StatusCode::UPGRADE_REQUIRED,
-						axum::Json(serde_json::json!({
-							"message": "Invalid client version.",
-							"required_version": env!("CARGO_PKG_VERSION")
-						}))
-					)
-						.into_response()
-				}
-			}
-		}
+		Err(err) => match err {
+			PacketError::MissingHeaderError(header_name) => (
+				axum::http::StatusCode::BAD_REQUEST,
+				axum::Json(serde_json::json!({
+					"message": "Header missing from packet.",
+					"header_name": header_name.as_str()
+				})),
+			)
+				.into_response(),
+			PacketError::InvalidVersion(_) => (
+				axum::http::StatusCode::UPGRADE_REQUIRED,
+				axum::Json(serde_json::json!({
+					"message": "Invalid client version.",
+					"required_version": env!("CARGO_PKG_VERSION")
+				})),
+			)
+				.into_response(),
+		},
 	}
+}
+
+async fn generate_session(user_id: u64) -> u64 {
+	todo!()
+}
+
+#[derive(Debug)]
+enum EasyManagerError {
+	SocketError(io::Error),
+	DatabaseError(sea_orm::DbErr),
+	HTTPError(io::Error)
 }
 
 #[tracing::instrument]
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), EasyManagerError> {
 	let _logging_guard = init_logging();
 
 	let router: axum::Router = axum::Router::new()
 		.route("/", axum::routing::method_routing::get(get_device_info))
 		.layer(axum::middleware::from_fn(packet_validation_middleware));
 
-	let listener = match tokio::net::TcpListener::bind("0.0.0.0:3000").await {
-		Ok(listener) => listener,
-		Err(err) => {
+	let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
+		.await
+		.map_err(|err| {
 			tracing::error!(%err, "Failed to start TCP listener");
-			return;
-		}
-	};
+			EasyManagerError::SocketError(err)
+		})?;
+
+	let db_connection: sea_orm::DatabaseConnection =
+		sea_orm::Database::connect(std::env::var("DATABASE_URL").expect("DATABASE_URL is not set"))
+			.await
+			.map_err(|err| {
+				tracing::error!(%err, "Failed to connect to database");
+				EasyManagerError::DatabaseError(err)
+			})?;
+
+	migration::Migrator::up(&db_connection, None).await.map_err(|err| {
+		tracing::error!(%err, "Failed to make migration on database");
+		EasyManagerError::DatabaseError(err)
+	})?;
 
 	tracing::info!("Listening on 3000");
 
-	let _ = axum::serve(listener, router)
+	axum::serve(listener, router)
 		.await
-		.inspect_err(|err| tracing::error!(%err));
+		.map_err(|err| {
+			tracing::error!(%err);
+			EasyManagerError::HTTPError(err)
+		})
 }

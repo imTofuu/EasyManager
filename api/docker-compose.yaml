@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgres:18
+    environment:
+      - POSTGRES_USER=easy_manager
+      - POSTGRES_PASSWORD=password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_USER}"]
+      interval: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+      
+  api:
+    build:
+      context: .
+      dockerfile: easy_manager_server/Dockerfile
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+        restart: true
+    environment:
+      - DATABASE_URL=postgres://easy_manager:password@db:5432/easy_manager

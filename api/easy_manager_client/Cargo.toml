@@ -1,7 +1,0 @@
-[package]
-name = "easy_manager_client"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-easy_manager_core = { path = "../easy_manager_core" }

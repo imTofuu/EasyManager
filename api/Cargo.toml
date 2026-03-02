@@ -1,0 +1,3 @@
+[workspace]
+members = ["easy_manager_server", "easy_manager_core"]
+resolver = "3"
