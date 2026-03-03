@@ -1,3 +1,4 @@
+use axum::response::Response;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -29,22 +30,75 @@ impl Display for PacketError {
 
 impl Error for PacketError {}
 
-#[tracing::instrument]
-pub fn validate_packet(headers: &axum::http::HeaderMap) -> Result<(), PacketError> {
-	let client_version: &axum::http::HeaderValue = headers
-		.get(CLIENT_VERSION)
-		.ok_or(PacketError::MissingHeaderError(CLIENT_VERSION))
-		.inspect_err(|err: &PacketError| tracing::error!(%err, "Invalid packet"))?;
-
-	if client_version != env!("CARGO_PKG_VERSION") {
-		return Err(PacketError::InvalidVersion(client_version.clone()));
-	}
-
-	Ok(())
+pub enum PacketState {
+	Auth(String),
+	Unauth,
+	Invalid(PacketError),
 }
 
-pub mod get {
+#[tracing::instrument]
+pub fn parse_packet_state(headers: &axum::http::HeaderMap) -> PacketState {
+	let client_version: &axum::http::HeaderValue = match headers
+		.get(CLIENT_VERSION)
+		.ok_or(PacketError::MissingHeaderError(CLIENT_VERSION))
+	{
+		Ok(headers) => headers,
+		Err(err) => return PacketState::Invalid(err),
+	};
 
-	#[derive(serde::Serialize)]
-	pub struct DeviceInfo {}
+	if client_version != env!("CARGO_PKG_VERSION") {
+		return PacketState::Invalid(PacketError::InvalidVersion(client_version.clone()));
+	}
+
+	match headers
+		.get(axum::http::header::AUTHORIZATION)
+		.ok_or(PacketError::MissingHeaderError(
+			axum::http::header::AUTHORIZATION,
+		)) {
+		Ok(id) => id
+			.to_str()
+			.map(|id_str| PacketState::Auth(id_str.to_owned()))
+			.unwrap_or(PacketState::Unauth),
+		Err(err) => PacketState::Invalid(err),
+	}
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ErrorPacket {
+	message: String,
+}
+
+pub enum Packet<T: serde::Serialize + serde::de::DeserializeOwned> {
+	Ok(T),
+	Error(ErrorPacket),
+}
+
+impl<T: serde::Serialize + serde::de::DeserializeOwned> axum::response::IntoResponse for Packet<T> {
+	fn into_response(self) -> Response {
+		match self {
+			Packet::Ok(val) => axum::Json(val).into_response(),
+			Packet::Error(error_packet) => axum::Json(error_packet).into_response(),
+		}
+	}
+}
+
+pub mod get {}
+
+pub mod post {
+
+	#[derive(serde::Serialize, serde::Deserialize)]
+	pub struct GenerateSession {
+		pub session_id: String,
+	}
+	
+	#[derive(serde::Serialize, serde::Deserialize)]
+	pub struct CreateUserResponse {
+		pub user_id: String
+	}
+	
+	#[derive(serde::Serialize, serde::Deserialize)]
+	pub struct CreateUserRequest {
+		pub username: String,
+		pub password_hash: String
+	}
 }

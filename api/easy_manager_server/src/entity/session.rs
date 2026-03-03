@@ -9,6 +9,7 @@ pub struct Model {
 	pub session_id: Uuid,
 	pub user_id: Uuid,
 	pub created_at: DateTimeWithTimeZone,
+	pub expired: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

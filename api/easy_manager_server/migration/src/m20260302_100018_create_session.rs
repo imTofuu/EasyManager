@@ -1,5 +1,5 @@
-use sea_orm_migration::{prelude::*, schema::*};
 use crate::m20220101_000001_create_users::User;
+use sea_orm_migration::{prelude::*};
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -34,7 +34,18 @@ impl MigrationTrait for Migration {
 							.default(Expr::current_timestamp())
 							.not_null(),
 					)
-					.foreign_key(ForeignKey::create().name("fk-session-userid").from(Session::Table, Session::UserId).to(User::Table, User::UserId))
+					.col(
+						ColumnDef::new(Session::Expired)
+							.boolean()
+							.default(false)
+							.not_null(),
+					)
+					.foreign_key(
+						ForeignKey::create()
+							.name("fk-session-userid")
+							.from(Session::Table, Session::UserId)
+							.to(User::Table, User::UserId),
+					)
 					.to_owned(),
 			)
 			.await
