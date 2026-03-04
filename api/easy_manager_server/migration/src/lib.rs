@@ -1,3 +1,5 @@
+#![allow(clippy::enum_variant_names)]
+
 pub use sea_orm_migration::prelude::*;
 
 mod m20220101_000001_create_users;

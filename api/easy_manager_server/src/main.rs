@@ -1,14 +1,26 @@
+#![warn(clippy::unwrap_used)]
+
 mod endpoints;
 mod entity;
 
+use crate::entity::prelude::Session;
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::header::AUTHORIZATION;
+use axum::http::{Request, Response, StatusCode};
+use axum::middleware::Next;
 use axum::response::IntoResponse;
-use easy_manager_core::packets::PacketError;
-use easy_manager_core::packets::PacketState::{Auth, Invalid};
+use axum::routing::method_routing;
+use axum::{Router, middleware};
+use easy_manager_core::packets::{ErrorPacket, Packet, PacketError, validate_packet};
 use migration::MigratorTrait;
+use sea_orm::{DatabaseConnection, EntityTrait};
 use std::io;
+use std::str::FromStr;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use uuid::Uuid;
 
 #[tracing::instrument]
 fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
@@ -53,18 +65,69 @@ fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
 	file_guard
 }
 
-async fn packet_validation_middleware(
-	req: axum::http::Request<axum::body::Body>,
-	next: axum::middleware::Next,
-) -> axum::http::Response<axum::body::Body> {
-	if req.uri() == "/ping" {
-		return next.run(req).await;
+#[tracing::instrument]
+async fn auth_middleware(
+	State(state): State<DatabaseConnection>,
+	mut req: Request<Body>,
+	next: Next,
+) -> Response<Body> {
+	let session_id: Uuid =
+		match req.headers().get(AUTHORIZATION) {
+			Some(session_id) => Uuid::from_str(session_id.to_str().unwrap()).unwrap(),
+			None => return (
+				StatusCode::UNAUTHORIZED,
+				Packet::<()>::Error(ErrorPacket {
+					message:
+						"This endpoint requires a valid session token in the Authorization header"
+							.to_owned(),
+				}),
+			)
+				.into_response(),
+		};
+	match Session::find_by_id(session_id).one(&state).await {
+		Ok(session) => match session {
+			Some(session) => {
+				if session.expired {
+					return (
+						StatusCode::FORBIDDEN,
+						Packet::<()>::Error(ErrorPacket {
+							message: "Session is expired".to_owned(),
+						}),
+					)
+						.into_response();
+				}
+			}
+			None => {
+				return (
+					StatusCode::FORBIDDEN,
+					Packet::<()>::Error(ErrorPacket {
+						message: "Session is not found".to_owned(),
+					}),
+				)
+					.into_response();
+			}
+		},
+		Err(err) => {
+			tracing::error!(%err, "An error occurred validating a session");
+			return (
+				StatusCode::INTERNAL_SERVER_ERROR,
+				Packet::<()>::Error(ErrorPacket {
+					message: "Something went wrong validating the session".to_owned(),
+				}),
+			)
+				.into_response();
+		}
 	}
-	match easy_manager_core::packets::parse_packet_state(req.headers()) {
-		Auth(id) => next.run(req).await,
-		Invalid(err) => match err {
-			PacketError::MissingHeaderError(header_name) => (
-				axum::http::StatusCode::BAD_REQUEST,
+	req.extensions_mut().insert(session_id);
+	next.run(req).await
+}
+
+async fn packet_validation_middleware(req: Request<Body>, next: Next) -> Response<Body> {
+	match validate_packet(req.headers()) {
+		Ok(_) => next.run(req).await,
+		Err(err) => match err {
+			PacketError::MissingHeader(header_name) => (
+				StatusCode::BAD_REQUEST,
 				axum::Json(serde_json::json!({
 					"message": "Header missing from packet.",
 					"header_name": header_name.as_str()
@@ -72,7 +135,7 @@ async fn packet_validation_middleware(
 			)
 				.into_response(),
 			PacketError::InvalidVersion(_) => (
-				axum::http::StatusCode::UPGRADE_REQUIRED,
+				StatusCode::UPGRADE_REQUIRED,
 				axum::Json(serde_json::json!({
 					"message": "Invalid client version.",
 					"required_version": env!("CARGO_PKG_VERSION")
@@ -80,11 +143,11 @@ async fn packet_validation_middleware(
 			)
 				.into_response(),
 		},
-		_ => next.run(req).await,
 	}
 }
 
 #[derive(Debug)]
+#[allow(unused)]
 enum EasyManagerError {
 	SocketError(io::Error),
 	DatabaseError(sea_orm::DbErr),
@@ -96,13 +159,16 @@ enum EasyManagerError {
 async fn main() -> Result<(), EasyManagerError> {
 	let _logging_guard = init_logging();
 
-	let db_connection: sea_orm::DatabaseConnection =
+	// Connect to database and migrate
+	let db_connection: DatabaseConnection =
 		sea_orm::Database::connect(std::env::var("DATABASE_URL").expect("DATABASE_URL is not set"))
 			.await
 			.map_err(|err| {
 				tracing::error!(%err, "Failed to connect to database");
 				EasyManagerError::DatabaseError(err)
 			})?;
+
+	tracing::debug!("Connected to database");
 
 	migration::Migrator::up(&db_connection, None)
 		.await
@@ -111,16 +177,31 @@ async fn main() -> Result<(), EasyManagerError> {
 			EasyManagerError::DatabaseError(err)
 		})?;
 
-	let router: axum::Router = axum::Router::new()
-		.route("/ping", axum::routing::method_routing::get(endpoints::ping))
-		.route("/user", axum::routing::method_routing::post(endpoints::create_user))
+	tracing::debug!("Migration complete");
+
+	// Define HTTP handlers
+	let auth_router: Router = Router::new()
+		.route("/test", method_routing::get(endpoints::test))
+		.layer(middleware::from_fn_with_state(
+			db_connection.clone(),
+			auth_middleware,
+		))
+		.with_state(db_connection.clone());
+
+	let unauth_router: Router = Router::new()
+		.route("/ping", method_routing::get(endpoints::ping))
+		.route("/user", method_routing::post(endpoints::create_user))
 		.route(
 			"/generate_session",
-			axum::routing::method_routing::post(endpoints::generate_session),
+			method_routing::post(endpoints::generate_session),
 		)
-		.layer(axum::middleware::from_fn(packet_validation_middleware))
-		.with_state(db_connection);
+		.with_state(db_connection.clone());
 
+	let main_router = auth_router
+		.merge(unauth_router)
+		.layer(middleware::from_fn(packet_validation_middleware));
+
+	// Open port 3000
 	let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
 		.await
 		.map_err(|err| {
@@ -130,7 +211,8 @@ async fn main() -> Result<(), EasyManagerError> {
 
 	tracing::info!("Listening on 3000");
 
-	axum::serve(listener, router).await.map_err(|err| {
+	// Put HTTP router on 3000
+	axum::serve(listener, main_router).await.map_err(|err| {
 		tracing::error!(%err);
 		EasyManagerError::HTTPError(err)
 	})

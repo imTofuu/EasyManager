@@ -1,39 +1,63 @@
-use std::str::FromStr;
 use crate::entity;
-use crate::entity::{session, user};
-use easy_manager_core::packets::Packet;
-use easy_manager_core::packets::post::{CreateUserRequest, CreateUserResponse, GenerateSession};
+use crate::entity::session;
+use crate::entity::user::ActiveModel;
+use axum::http::{HeaderMap, StatusCode};
+use easy_manager_core::packets::post::{CreateUserRequest, CreateUserResponse, GenerateSessionResponse};
+use easy_manager_core::packets::{ErrorPacket, Packet};
 use migration::{Expr, Value};
-use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;
+use sea_orm::{ColumnTrait, InsertResult};
 use sea_orm::{EntityTrait, NotSet, Set};
+use std::str::FromStr;
 
+#[tracing::instrument]
 pub async fn create_user(
 	state: axum::extract::State<sea_orm::DatabaseConnection>,
-	_headers: axum::http::HeaderMap,
-	axum::Json(create_user_request): axum::Json<CreateUserRequest>
-) -> (axum::http::StatusCode, Packet<CreateUserResponse>) {
-	// todo make this safe
-	let insert = entity::prelude::User::insert(user::ActiveModel {
+	_headers: HeaderMap,
+	axum::Json(create_user_request): axum::Json<CreateUserRequest>,
+) -> (StatusCode, Packet<CreateUserResponse>) {
+	let insert: InsertResult<ActiveModel> = match entity::prelude::User::insert(ActiveModel {
 		user_id: Set(uuid::Uuid::new_v4()),
 		username: Set(create_user_request.username),
 		password_hash: Set(create_user_request.password_hash),
 		created_at: Default::default(),
-	}).exec(&state.0).await.unwrap();
-	(axum::http::StatusCode::CREATED, Packet::Ok(CreateUserResponse {
-		user_id: insert.last_insert_id.to_string()
-	}))
+	})
+	.exec(&state.0)
+	.await
+	{
+		Ok(insert_result) => insert_result,
+		Err(err) => {
+			tracing::error!(%err, "Failed to insert into database");
+			return (
+				StatusCode::INTERNAL_SERVER_ERROR,
+				Packet::Error(ErrorPacket {
+					message: "Failed to insert into database".to_owned(),
+				}),
+			);
+		}
+	};
+	(
+		StatusCode::CREATED,
+		Packet::Ok(CreateUserResponse {
+			user_id: insert.last_insert_id.to_string(),
+		}),
+	)
 }
 
+#[tracing::instrument]
 pub async fn generate_session(
 	state: axum::extract::State<sea_orm::DatabaseConnection>,
-	req: axum::http::Request<axum::body::Body>,
-) -> (axum::http::StatusCode, Packet<GenerateSession>) {
+	headers: HeaderMap,
+) -> (StatusCode, Packet<GenerateSessionResponse>) {
 	// todo make this safe
-	let user_id = uuid::Uuid::from_str(req
-		.headers()
-		.get(axum::http::header::AUTHORIZATION)
-		.unwrap().to_str().unwrap()).unwrap();
+	let user_id = uuid::Uuid::from_str(
+		headers
+			.get(axum::http::header::AUTHORIZATION)
+			.unwrap()
+			.to_str()
+			.unwrap(),
+	)
+	.unwrap();
 	let _ = entity::prelude::Session::update_many()
 		.col_expr(
 			session::Column::Expired,
@@ -52,13 +76,19 @@ pub async fn generate_session(
 	.await
 	.unwrap();
 
-	let response = GenerateSession {
+	let response = GenerateSessionResponse {
 		session_id: insert.last_insert_id.to_string(),
 	};
 
-	(axum::http::StatusCode::CREATED, Packet::Ok(response))
+	(StatusCode::CREATED, Packet::Ok(response))
 }
 
-pub async fn ping() -> axum::http::StatusCode {
-	axum::http::StatusCode::OK
+#[tracing::instrument]
+pub async fn ping() -> StatusCode {
+	StatusCode::OK
+}
+
+#[tracing::instrument]
+pub async fn test() -> StatusCode {
+	StatusCode::OK
 }

@@ -13,16 +13,16 @@ pub fn get_default_client_headers() -> axum::http::HeaderMap {
 	result
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PacketError {
-	MissingHeaderError(axum::http::HeaderName),
+	MissingHeader(axum::http::HeaderName),
 	InvalidVersion(axum::http::HeaderValue),
 }
 
 impl Display for PacketError {
 	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
 		match self {
-			PacketError::MissingHeaderError(header_name) => write!(f, "{header_name}"),
+			PacketError::MissingHeader(header_name) => write!(f, "{header_name}"),
 			PacketError::InvalidVersion(version) => write!(f, "{version:?}"),
 		}
 	}
@@ -30,42 +30,22 @@ impl Display for PacketError {
 
 impl Error for PacketError {}
 
-pub enum PacketState {
-	Auth(String),
-	Unauth,
-	Invalid(PacketError),
-}
-
 #[tracing::instrument]
-pub fn parse_packet_state(headers: &axum::http::HeaderMap) -> PacketState {
-	let client_version: &axum::http::HeaderValue = match headers
+pub fn validate_packet(headers: &axum::http::HeaderMap) -> Result<(), PacketError> {
+	let client_version: &axum::http::HeaderValue = headers
 		.get(CLIENT_VERSION)
-		.ok_or(PacketError::MissingHeaderError(CLIENT_VERSION))
-	{
-		Ok(headers) => headers,
-		Err(err) => return PacketState::Invalid(err),
-	};
+		.ok_or(PacketError::MissingHeader(CLIENT_VERSION))?;
 
 	if client_version != env!("CARGO_PKG_VERSION") {
-		return PacketState::Invalid(PacketError::InvalidVersion(client_version.clone()));
-	}
-
-	match headers
-		.get(axum::http::header::AUTHORIZATION)
-		.ok_or(PacketError::MissingHeaderError(
-			axum::http::header::AUTHORIZATION,
-		)) {
-		Ok(id) => id
-			.to_str()
-			.map(|id_str| PacketState::Auth(id_str.to_owned()))
-			.unwrap_or(PacketState::Unauth),
-		Err(err) => PacketState::Invalid(err),
+		Err(PacketError::InvalidVersion(client_version.to_owned()))
+	} else {
+		Ok(())
 	}
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ErrorPacket {
-	message: String,
+	pub message: String,
 }
 
 pub enum Packet<T: serde::Serialize + serde::de::DeserializeOwned> {
@@ -85,20 +65,30 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> axum::response::IntoResp
 pub mod get {}
 
 pub mod post {
-
-	#[derive(serde::Serialize, serde::Deserialize)]
-	pub struct GenerateSession {
-		pub session_id: String,
-	}
+	use std::fmt::{Debug, Formatter};
 	
-	#[derive(serde::Serialize, serde::Deserialize)]
-	pub struct CreateUserResponse {
-		pub user_id: String
+	#[derive(Debug, serde::Serialize, serde::Deserialize)]
+	pub struct GenerateSessionResponse {
+		pub session_id: String,
 	}
 	
 	#[derive(serde::Serialize, serde::Deserialize)]
 	pub struct CreateUserRequest {
 		pub username: String,
-		pub password_hash: String
+		pub password_hash: String,
+	}
+	
+	#[derive(Debug, serde::Serialize, serde::Deserialize)]
+	pub struct CreateUserResponse {
+		pub user_id: String,
+	}
+	
+	impl Debug for CreateUserRequest {
+		fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+			f.debug_struct("CreateUserRequest")
+				.field("username", &self.username)
+				.field("password_hash", &"password_hash".to_owned())
+				.finish()
+		}
 	}
 }
