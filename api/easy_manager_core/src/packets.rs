@@ -65,29 +65,41 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> axum::response::IntoResp
 pub mod get {}
 
 pub mod post {
+	use crate::AccountIdentifier;
 	use std::fmt::{Debug, Formatter};
-	
-	#[derive(Debug, serde::Serialize, serde::Deserialize)]
-	pub struct GenerateSessionResponse {
+
+	#[derive(serde::Serialize, serde::Deserialize)]
+	pub struct LoginRequest {
+		pub account_identifier: AccountIdentifier,
+		pub password: String,
+	}
+
+	#[derive(serde::Serialize, serde::Deserialize)]
+	pub struct LoginResponse {
 		pub session_id: String,
 	}
-	
+
 	#[derive(serde::Serialize, serde::Deserialize)]
 	pub struct CreateUserRequest {
+		pub email: String,
 		pub username: String,
-		pub password_hash: String,
+		pub password: String,
 	}
-	
-	#[derive(Debug, serde::Serialize, serde::Deserialize)]
-	pub struct CreateUserResponse {
-		pub user_id: String,
+
+	impl Debug for LoginRequest {
+		fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+			f.debug_struct("LoginRequest")
+				.field("account_identifier", &self.account_identifier)
+				.field("password", &"password".to_owned())
+				.finish()
+		}
 	}
-	
+
 	impl Debug for CreateUserRequest {
 		fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
 			f.debug_struct("CreateUserRequest")
 				.field("username", &self.username)
-				.field("password_hash", &"password_hash".to_owned())
+				.field("password", &"password".to_owned())
 				.finish()
 		}
 	}

@@ -1,20 +1,22 @@
+#@name create_user
 POST http://127.0.0.1:3000/user
 client-version: 0.1.0
 Content-Type: application/json
 
 {
+  "email": "example@gmail.com",
   "username": "user",
-  "password_hash": "password"
+  "password": "password"
 }
 
 ###
 
-GET 127.0.0.1:3000/generate-session
+#@name login
+POST 127.0.0.1:3000/login
 client-version: 0.1.0
-Authorization: #
+Content-Type: application/json
 
-###
-
-GET 127.0.0.1:3000/test
-client-version: 0.1.0
-Authorization: 0734fc36-a59c-4528-bfd5-0c9d42c21eaf
+{
+  "account_identifier": {"username": "user" },
+  "password": "password"
+}

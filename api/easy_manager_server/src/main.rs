@@ -191,10 +191,7 @@ async fn main() -> Result<(), EasyManagerError> {
 	let unauth_router: Router = Router::new()
 		.route("/ping", method_routing::get(endpoints::ping))
 		.route("/user", method_routing::post(endpoints::create_user))
-		.route(
-			"/generate_session",
-			method_routing::post(endpoints::generate_session),
-		)
+		.route("/login", method_routing::post(endpoints::login))
 		.with_state(db_connection.clone());
 
 	let main_router = auth_router
