@@ -20,3 +20,9 @@ Content-Type: application/json
   "account_identifier": {"username": "user" },
   "password": "password"
 }
+
+###
+
+#@name test
+GET 127.0.0.1:3000/test
+client-version: 0.1.0

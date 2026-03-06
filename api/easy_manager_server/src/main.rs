@@ -6,17 +6,18 @@ mod entity;
 use crate::entity::prelude::Session;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::header::AUTHORIZATION;
 use axum::http::{Request, Response, StatusCode};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::routing::method_routing;
 use axum::{Router, middleware};
+use axum_extra::extract::CookieJar;
 use easy_manager_core::packets::{ErrorPacket, Packet, PacketError, validate_packet};
 use migration::MigratorTrait;
 use sea_orm::{DatabaseConnection, EntityTrait};
 use std::io;
 use std::str::FromStr;
+use axum_extra::extract::cookie::Cookie;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -68,28 +69,44 @@ fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
 #[tracing::instrument]
 async fn auth_middleware(
 	State(state): State<DatabaseConnection>,
+	cookie_jar: CookieJar,
 	mut req: Request<Body>,
 	next: Next,
 ) -> Response<Body> {
-	let session_id: Uuid =
-		match req.headers().get(AUTHORIZATION) {
-			Some(session_id) => Uuid::from_str(session_id.to_str().unwrap()).unwrap(),
-			None => return (
+	let session_id: Uuid = match cookie_jar.get("session") {
+		Some(session_id) => match Uuid::from_str(session_id.value()) {
+			Ok(session_id) => session_id,
+			Err(_) => {
+				let cookie_jar = cookie_jar.remove(Cookie::build("session").path("/"));
+				return (
+					StatusCode::UNAUTHORIZED,
+					cookie_jar,
+					Packet::<()>::Error(ErrorPacket {
+						message: "Invalid session, please login again".to_owned(),
+					}),
+				)
+					.into_response();
+			}
+		},
+		None => {
+			return (
 				StatusCode::UNAUTHORIZED,
 				Packet::<()>::Error(ErrorPacket {
-					message:
-						"This endpoint requires a valid session token in the Authorization header"
-							.to_owned(),
+					message: "Please login".to_owned(),
 				}),
 			)
-				.into_response(),
-		};
+				.into_response();
+		}
+	};
+
 	match Session::find_by_id(session_id).one(&state).await {
 		Ok(session) => match session {
 			Some(session) => {
 				if session.expired {
+					let cookie_jar = cookie_jar.remove(Cookie::build("session").path("/"));
 					return (
 						StatusCode::FORBIDDEN,
+						cookie_jar,
 						Packet::<()>::Error(ErrorPacket {
 							message: "Session is expired".to_owned(),
 						}),
@@ -98,8 +115,10 @@ async fn auth_middleware(
 				}
 			}
 			None => {
+				let cookie_jar = cookie_jar.remove(Cookie::build("session").path("/"));
 				return (
 					StatusCode::FORBIDDEN,
+					cookie_jar,
 					Packet::<()>::Error(ErrorPacket {
 						message: "Session is not found".to_owned(),
 					}),
@@ -149,9 +168,9 @@ async fn packet_validation_middleware(req: Request<Body>, next: Next) -> Respons
 #[derive(Debug)]
 #[allow(unused)]
 enum EasyManagerError {
-	SocketError(io::Error),
-	DatabaseError(sea_orm::DbErr),
-	HTTPError(io::Error),
+	Socket(io::Error),
+	Database(sea_orm::DbErr),
+	Http(io::Error),
 }
 
 #[tracing::instrument]
@@ -165,7 +184,7 @@ async fn main() -> Result<(), EasyManagerError> {
 			.await
 			.map_err(|err| {
 				tracing::error!(%err, "Failed to connect to database");
-				EasyManagerError::DatabaseError(err)
+				EasyManagerError::Database(err)
 			})?;
 
 	tracing::debug!("Connected to database");
@@ -174,7 +193,7 @@ async fn main() -> Result<(), EasyManagerError> {
 		.await
 		.map_err(|err| {
 			tracing::error!(%err, "Failed to make migration on database");
-			EasyManagerError::DatabaseError(err)
+			EasyManagerError::Database(err)
 		})?;
 
 	tracing::debug!("Migration complete");
@@ -203,7 +222,7 @@ async fn main() -> Result<(), EasyManagerError> {
 		.await
 		.map_err(|err| {
 			tracing::error!(%err, "Failed to start TCP listener");
-			EasyManagerError::SocketError(err)
+			EasyManagerError::Socket(err)
 		})?;
 
 	tracing::info!("Listening on 3000");
@@ -211,6 +230,6 @@ async fn main() -> Result<(), EasyManagerError> {
 	// Put HTTP router on 3000
 	axum::serve(listener, main_router).await.map_err(|err| {
 		tracing::error!(%err);
-		EasyManagerError::HTTPError(err)
+		EasyManagerError::Http(err)
 	})
 }

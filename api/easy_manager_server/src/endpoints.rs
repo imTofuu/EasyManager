@@ -19,12 +19,12 @@ use sea_orm::QueryFilter;
 use sea_orm::{EntityTrait, NotSet, Set};
 use uuid::Uuid;
 
-const EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| {
+static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| {
 	Regex::new(r#"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"#)
 		.expect("Invalid email regex pattern")
 });
 
-const DUMMY_PASSWORD_HASH: Lazy<String> = Lazy::new(|| {
+static DUMMY_PASSWORD_HASH: Lazy<String> = Lazy::new(|| {
 	let salt: SaltString = SaltString::generate(&mut OsRng);
 	Argon2::default()
 		.hash_password("dummy".as_bytes(), &salt)
@@ -37,7 +37,7 @@ pub async fn create_user(
 	state: State<sea_orm::DatabaseConnection>,
 	Json(create_user_request): Json<CreateUserRequest>,
 ) -> (StatusCode, Packet<()>) {
-	// todo add proper validation
+	// todo add proper validation for this and other functions
 
 	if !EMAIL_REGEX.is_match(create_user_request.email.as_str()) {
 		return (
