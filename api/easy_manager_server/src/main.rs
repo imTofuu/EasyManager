@@ -3,6 +3,7 @@
 mod endpoints;
 mod entity;
 
+use crate::endpoints::create_user_unchecked;
 use crate::entity::prelude::Session;
 use axum::body::Body;
 use axum::extract::State;
@@ -12,12 +13,13 @@ use axum::response::IntoResponse;
 use axum::routing::method_routing;
 use axum::{Router, middleware};
 use axum_extra::extract::CookieJar;
+use easy_manager_core::PermissionLevel;
+use easy_manager_core::packets::post::CreateUserRequest;
 use easy_manager_core::packets::{ErrorPacket, Packet, PacketError, validate_packet};
 use migration::MigratorTrait;
 use sea_orm::{DatabaseConnection, EntityTrait};
 use std::io;
 use std::str::FromStr;
-use axum_extra::extract::cookie::Cookie;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -68,7 +70,7 @@ fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
 
 #[tracing::instrument]
 async fn auth_middleware(
-	State(state): State<DatabaseConnection>,
+	state: State<DatabaseConnection>,
 	cookie_jar: CookieJar,
 	mut req: Request<Body>,
 	next: Next,
@@ -77,7 +79,7 @@ async fn auth_middleware(
 		Some(session_id) => match Uuid::from_str(session_id.value()) {
 			Ok(session_id) => session_id,
 			Err(_) => {
-				let cookie_jar = cookie_jar.remove(Cookie::build("session").path("/"));
+				let (_, cookie_jar) = endpoints::logout(state, cookie_jar).await;
 				return (
 					StatusCode::UNAUTHORIZED,
 					cookie_jar,
@@ -99,28 +101,29 @@ async fn auth_middleware(
 		}
 	};
 
-	match Session::find_by_id(session_id).one(&state).await {
+	let session = match Session::find_by_id(session_id).one(&state.0).await {
 		Ok(session) => match session {
 			Some(session) => {
 				if session.expired {
-					let cookie_jar = cookie_jar.remove(Cookie::build("session").path("/"));
+					let (_, cookie_jar) = endpoints::logout(state, cookie_jar).await;
 					return (
 						StatusCode::FORBIDDEN,
 						cookie_jar,
 						Packet::<()>::Error(ErrorPacket {
-							message: "Session is expired".to_owned(),
+							message: "Session is expired, please login again".to_owned(),
 						}),
 					)
 						.into_response();
 				}
+				session
 			}
 			None => {
-				let cookie_jar = cookie_jar.remove(Cookie::build("session").path("/"));
+				let (_, cookie_jar) = endpoints::logout(state, cookie_jar).await;
 				return (
 					StatusCode::FORBIDDEN,
 					cookie_jar,
 					Packet::<()>::Error(ErrorPacket {
-						message: "Session is not found".to_owned(),
+						message: "Session is not found, please login again".to_owned(),
 					}),
 				)
 					.into_response();
@@ -136,8 +139,8 @@ async fn auth_middleware(
 			)
 				.into_response();
 		}
-	}
-	req.extensions_mut().insert(session_id);
+	};
+	req.extensions_mut().insert(session);
 	next.run(req).await
 }
 
@@ -198,9 +201,22 @@ async fn main() -> Result<(), EasyManagerError> {
 
 	tracing::debug!("Migration complete");
 
+	// Create default admin user
+	create_user_unchecked(
+		&db_connection,
+		CreateUserRequest {
+			email: "admin@admin.com".to_owned(),
+			username: "admin".to_owned(),
+			password: "admin".to_owned(),
+			permission_level: PermissionLevel::Admin,
+		},
+	)
+	.await;
+
 	// Define HTTP handlers
 	let auth_router: Router = Router::new()
-		.route("/test", method_routing::get(endpoints::test))
+		.route("/model", method_routing::post(endpoints::create_item_model))
+		.route("/user", method_routing::post(endpoints::create_user))
 		.layer(middleware::from_fn_with_state(
 			db_connection.clone(),
 			auth_middleware,
@@ -209,8 +225,12 @@ async fn main() -> Result<(), EasyManagerError> {
 
 	let unauth_router: Router = Router::new()
 		.route("/ping", method_routing::get(endpoints::ping))
-		.route("/user", method_routing::post(endpoints::create_user))
+		.route(
+			"/user/{user_id}",
+			method_routing::get(endpoints::get_public_user_info),
+		)
 		.route("/login", method_routing::post(endpoints::login))
+		.route("/logout", method_routing::post(endpoints::logout))
 		.with_state(db_connection.clone());
 
 	let main_router = auth_router

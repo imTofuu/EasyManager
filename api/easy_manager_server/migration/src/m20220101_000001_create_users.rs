@@ -10,6 +10,7 @@ pub enum User {
 	Email,
 	Username,
 	Password,
+	PermissionLevel,
 	CreatedAt,
 }
 
@@ -30,6 +31,7 @@ impl MigrationTrait for Migration {
 					)
 					.col(ColumnDef::new(User::Email).string().unique_key().not_null())
 					.col(ColumnDef::new(User::Password).string().not_null())
+					.col(ColumnDef::new(User::PermissionLevel).string().not_null())
 					.col(
 						ColumnDef::new(User::CreatedAt)
 							.timestamp_with_time_zone()

@@ -12,6 +12,7 @@ pub struct Model {
 	#[sea_orm(unique)]
 	pub email: String,
 	pub password: String,
+	pub permission_level: String,
 	pub created_at: DateTimeWithTimeZone,
 }
 

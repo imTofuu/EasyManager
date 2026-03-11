@@ -6,7 +6,8 @@ Content-Type: application/json
 {
   "email": "example@gmail.com",
   "username": "user",
-  "password": "password"
+  "password": "password",
+  "permission_level": "default"
 }
 
 ###
@@ -23,6 +24,25 @@ Content-Type: application/json
 
 ###
 
-#@name test
-GET 127.0.0.1:3000/test
+#@name login_root
+POST 127.0.0.1:3000/login
 client-version: 0.1.0
+Content-Type: application/json
+
+{
+  "account_identifier": {"username":  "admin"},
+  "password": "admin"
+}
+
+###
+
+#@name create_model
+POST 127.0.0.1:3000/model
+client-version: 0.1.0
+Content-Type: application/json
+
+{
+  "name": "Example Model",
+  "description": "Example Description",
+  "permission_level": "default"
+}

@@ -6,3 +6,31 @@ pub enum AccountIdentifier {
 	Email { email: String },
 	Username { username: String },
 }
+
+#[derive(Debug, Eq, PartialEq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionLevel {
+	Default,
+	Admin,
+}
+
+impl From<PermissionLevel> for String {
+	fn from(value: PermissionLevel) -> Self {
+		match value {
+			PermissionLevel::Admin => "admin".to_owned(),
+			PermissionLevel::Default => "default".to_owned(),
+		}
+	}
+}
+
+impl TryFrom<String> for PermissionLevel {
+	type Error = ();
+
+	fn try_from(value: String) -> Result<Self, Self::Error> {
+		match value.as_str() {
+			"admin" => Ok(Self::Admin),
+			"default" => Ok(Self::Default),
+			_ => Err(()),
+		}
+	}
+}

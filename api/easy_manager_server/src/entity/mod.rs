@@ -2,5 +2,6 @@
 
 pub mod prelude;
 
+pub mod item_model;
 pub mod session;
 pub mod user;

@@ -62,10 +62,18 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> axum::response::IntoResp
 	}
 }
 
-pub mod get {}
+pub mod get {
+	use crate::PermissionLevel;
+
+	#[derive(Debug, serde::Serialize, serde::Deserialize)]
+	pub struct GetUserInfoResponse {
+		pub username: String,
+		pub permission_level: PermissionLevel,
+	}
+}
 
 pub mod post {
-	use crate::AccountIdentifier;
+	use crate::{AccountIdentifier, PermissionLevel};
 	use std::fmt::{Debug, Formatter};
 
 	#[derive(serde::Serialize, serde::Deserialize)]
@@ -84,6 +92,14 @@ pub mod post {
 		pub email: String,
 		pub username: String,
 		pub password: String,
+		pub permission_level: PermissionLevel,
+	}
+
+	#[derive(Debug, serde::Serialize, serde::Deserialize)]
+	pub struct CreateItemModelRequest {
+		pub name: String,
+		pub description: Option<String>,
+		pub permission_level: PermissionLevel,
 	}
 
 	impl Debug for LoginRequest {
