@@ -46,3 +46,8 @@ Content-Type: application/json
   "description": "Example Description",
   "permission_level": "default"
 }
+
+###
+
+#@name ping
+GET 127.0.0.1:3000/ping

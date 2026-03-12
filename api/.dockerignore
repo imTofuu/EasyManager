@@ -1,2 +1,3 @@
 **/target/**
 *.http
+easy_manager_session_generator/.embuild

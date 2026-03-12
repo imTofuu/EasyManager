@@ -21,6 +21,7 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/* 
 
 COPY --from=builder /app/target/release/easy_manager_server easy_manager_server
