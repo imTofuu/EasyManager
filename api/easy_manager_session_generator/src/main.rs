@@ -7,6 +7,7 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+extern crate alloc;
 use esp_hal::clock::CpuClock;
 use esp_hal::main;
 use esp_hal::time::{Duration, Instant};
@@ -14,8 +15,6 @@ use esp_hal::timer::timg::TimerGroup;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
-
-extern crate alloc;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -40,7 +39,7 @@ fn main() -> ! {
 	let (mut _wifi_controller, _interfaces) =
 		esp_radio::wifi::new(&radio_init, peripherals.WIFI, Default::default())
 			.expect("Failed to initialize Wi-Fi controller");
-
+	
 	loop {
 		let delay_start = Instant::now();
 		while delay_start.elapsed() < Duration::from_millis(500) {}

@@ -215,10 +215,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "easy_manager_core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "easy_manager_session_generator"
 version = "0.1.0"
 dependencies = [
  "critical-section",
+ "easy_manager_core",
  "embedded-io 0.7.1",
  "esp-alloc",
  "esp-bootloader-esp-idf",

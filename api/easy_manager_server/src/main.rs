@@ -15,7 +15,7 @@ use axum::{Router, middleware};
 use axum_extra::extract::CookieJar;
 use easy_manager_core::PermissionLevel;
 use easy_manager_core::packets::post::CreateUserRequest;
-use easy_manager_core::packets::{ErrorPacket, Packet, PacketError, validate_packet};
+use easy_manager_core::packets::{CLIENT_VERSION_HN, ErrorPacket, Packet, PacketError};
 use migration::MigratorTrait;
 use sea_orm::{DatabaseConnection, EntityTrait};
 use std::io;
@@ -68,6 +68,23 @@ fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
 	file_guard
 }
 
+struct ResponsePacket<T: serde::Serialize + serde::de::DeserializeOwned>(Packet<T>);
+
+impl<T: serde::Serialize + serde::de::DeserializeOwned> IntoResponse for ResponsePacket<T> {
+	fn into_response(self) -> axum::response::Response {
+		match self.0 {
+			Packet::Ok(val) => axum::Json(val).into_response(),
+			Packet::Error(error_packet) => axum::Json(error_packet).into_response(),
+		}
+	}
+}
+
+impl<T: serde::Serialize + serde::de::DeserializeOwned> From<Packet<T>> for ResponsePacket<T> {
+	fn from(value: Packet<T>) -> Self {
+		Self(value)
+	}
+}
+
 #[tracing::instrument]
 async fn auth_middleware(
 	state: State<DatabaseConnection>,
@@ -83,9 +100,9 @@ async fn auth_middleware(
 				return (
 					StatusCode::UNAUTHORIZED,
 					cookie_jar,
-					Packet::<()>::Error(ErrorPacket {
+					ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
 						message: "Invalid session, please login again".to_owned(),
-					}),
+					})),
 				)
 					.into_response();
 			}
@@ -93,9 +110,10 @@ async fn auth_middleware(
 		None => {
 			return (
 				StatusCode::UNAUTHORIZED,
-				Packet::<()>::Error(ErrorPacket {
+				cookie_jar,
+				ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
 					message: "Please login".to_owned(),
-				}),
+				})),
 			)
 				.into_response();
 		}
@@ -109,9 +127,9 @@ async fn auth_middleware(
 					return (
 						StatusCode::FORBIDDEN,
 						cookie_jar,
-						Packet::<()>::Error(ErrorPacket {
+						ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
 							message: "Session is expired, please login again".to_owned(),
-						}),
+						})),
 					)
 						.into_response();
 				}
@@ -122,9 +140,9 @@ async fn auth_middleware(
 				return (
 					StatusCode::FORBIDDEN,
 					cookie_jar,
-					Packet::<()>::Error(ErrorPacket {
+					ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
 						message: "Session is not found, please login again".to_owned(),
-					}),
+					})),
 				)
 					.into_response();
 			}
@@ -133,15 +151,34 @@ async fn auth_middleware(
 			tracing::error!(%err, "An error occurred validating a session");
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
-				Packet::<()>::Error(ErrorPacket {
+				cookie_jar,
+				ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
 					message: "Something went wrong validating the session".to_owned(),
-				}),
+				})),
 			)
 				.into_response();
 		}
 	};
 	req.extensions_mut().insert(session);
 	next.run(req).await
+}
+
+#[tracing::instrument]
+pub fn validate_packet(headers: &axum::http::HeaderMap) -> Result<(), PacketError> {
+	let client_version: &axum::http::HeaderValue = headers
+		.get(CLIENT_VERSION_HN)
+		.ok_or(PacketError::MissingHeader(CLIENT_VERSION_HN.to_owned()))?;
+
+	if client_version != env!("CARGO_PKG_VERSION") {
+		Err(PacketError::InvalidVersion(
+			client_version
+				.to_str()
+				.unwrap_or("Unknown version")
+				.to_owned(),
+		))
+	} else {
+		Ok(())
+	}
 }
 
 async fn packet_validation_middleware(req: Request<Body>, next: Next) -> Response<Body> {

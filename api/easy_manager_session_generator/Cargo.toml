@@ -7,8 +7,11 @@ version      = "0.1.0"
 [[bin]]
 name = "easy_manager_session_generator"
 path = "src/main.rs"
+test = false
 
 [dependencies]
+easy_manager_core = { path = "../easy_manager_core" }
+
 esp-hal = { version = "~1.0", features = ["esp32", "unstable"] }
 
 esp-rtos = { version = "0.2.0", features = ["esp-alloc", "esp-radio", "esp32"] }

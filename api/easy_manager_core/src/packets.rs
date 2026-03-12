@@ -1,26 +1,17 @@
-use axum::response::Response;
-use std::error::Error;
-use std::fmt::{Display, Formatter};
+use alloc::string::String;
+use core::error::Error;
+use core::fmt::{Display, Formatter};
 
-pub const CLIENT_VERSION: axum::http::HeaderName =
-	axum::http::HeaderName::from_static("client-version");
-
-pub fn get_default_client_headers() -> axum::http::HeaderMap {
-	let mut result = axum::http::HeaderMap::new();
-
-	result.insert(CLIENT_VERSION, env!("CARGO_PKG_VERSION").parse().unwrap());
-
-	result
-}
+pub const CLIENT_VERSION_HN: &str = "client-version";
 
 #[derive(Debug, Clone)]
 pub enum PacketError {
-	MissingHeader(axum::http::HeaderName),
-	InvalidVersion(axum::http::HeaderValue),
+	MissingHeader(String),
+	InvalidVersion(String),
 }
 
 impl Display for PacketError {
-	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+	fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), core::fmt::Error> {
 		match self {
 			PacketError::MissingHeader(header_name) => write!(f, "{header_name}"),
 			PacketError::InvalidVersion(version) => write!(f, "{version:?}"),
@@ -29,19 +20,6 @@ impl Display for PacketError {
 }
 
 impl Error for PacketError {}
-
-#[tracing::instrument]
-pub fn validate_packet(headers: &axum::http::HeaderMap) -> Result<(), PacketError> {
-	let client_version: &axum::http::HeaderValue = headers
-		.get(CLIENT_VERSION)
-		.ok_or(PacketError::MissingHeader(CLIENT_VERSION))?;
-
-	if client_version != env!("CARGO_PKG_VERSION") {
-		Err(PacketError::InvalidVersion(client_version.to_owned()))
-	} else {
-		Ok(())
-	}
-}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ErrorPacket {
@@ -53,16 +31,8 @@ pub enum Packet<T: serde::Serialize + serde::de::DeserializeOwned> {
 	Error(ErrorPacket),
 }
 
-impl<T: serde::Serialize + serde::de::DeserializeOwned> axum::response::IntoResponse for Packet<T> {
-	fn into_response(self) -> Response {
-		match self {
-			Packet::Ok(val) => axum::Json(val).into_response(),
-			Packet::Error(error_packet) => axum::Json(error_packet).into_response(),
-		}
-	}
-}
-
 pub mod get {
+	use alloc::string::String;
 	use crate::PermissionLevel;
 
 	#[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -73,8 +43,10 @@ pub mod get {
 }
 
 pub mod post {
+	use alloc::borrow::ToOwned;
+	use alloc::string::String;
+	use core::fmt::{Debug, Formatter};
 	use crate::{AccountIdentifier, PermissionLevel};
-	use std::fmt::{Debug, Formatter};
 
 	#[derive(serde::Serialize, serde::Deserialize)]
 	pub struct LoginRequest {
@@ -103,7 +75,7 @@ pub mod post {
 	}
 
 	impl Debug for LoginRequest {
-		fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), core::fmt::Error> {
 			f.debug_struct("LoginRequest")
 				.field("account_identifier", &self.account_identifier)
 				.field("password", &"password".to_owned())
@@ -112,7 +84,7 @@ pub mod post {
 	}
 
 	impl Debug for CreateUserRequest {
-		fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), core::fmt::Error> {
 			f.debug_struct("CreateUserRequest")
 				.field("username", &self.username)
 				.field("password", &"password".to_owned())

@@ -10,6 +10,7 @@ tokio = { version = "1.49.0", features = ["rt-multi-thread"] }
 tracing = "0.1.44"
 tracing-appender = "0.2.4"
 tracing-subscriber = "0.3.22"
+serde = "1.0.228"
 serde_json = "1.0.149"
 sea-orm = { version = "1.1.19", features = ["sqlx-postgres", "runtime-tokio-native-tls"] }
 migration = { path = "migration" }

@@ -1,3 +1,9 @@
+#![no_std]
+extern crate alloc;
+
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+
 pub mod packets;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

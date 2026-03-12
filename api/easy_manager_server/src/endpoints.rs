@@ -1,3 +1,4 @@
+use crate::ResponsePacket;
 use crate::entity::prelude::{ItemModel, Session, User};
 use crate::entity::{item_model, session, user};
 use argon2::password_hash::rand_core::OsRng;
@@ -38,7 +39,7 @@ static DUMMY_PASSWORD_HASH: Lazy<String> = Lazy::new(|| {
 pub async fn get_public_user_info(
 	state: State<DatabaseConnection>,
 	Path(user_id): Path<Uuid>,
-) -> (StatusCode, Packet<GetUserInfoResponse>) {
+) -> (StatusCode, ResponsePacket<GetUserInfoResponse>) {
 	let user: user::Model = match User::find_by_id(user_id).one(&state.0).await {
 		Ok(user) => match user {
 			Some(user) => user,
@@ -48,7 +49,8 @@ pub async fn get_public_user_info(
 					StatusCode::INTERNAL_SERVER_ERROR,
 					Packet::Error(ErrorPacket {
 						message: "Something went wrong".to_owned(),
-					}),
+					})
+					.into(),
 				);
 			}
 		},
@@ -58,7 +60,8 @@ pub async fn get_public_user_info(
 				StatusCode::INTERNAL_SERVER_ERROR,
 				Packet::Error(ErrorPacket {
 					message: "Something went wrong".to_owned(),
-				}),
+				})
+				.into(),
 			);
 		}
 	};
@@ -71,7 +74,8 @@ pub async fn get_public_user_info(
 				StatusCode::INTERNAL_SERVER_ERROR,
 				Packet::Error(ErrorPacket {
 					message: "Something went wrong".to_owned(),
-				}),
+				})
+				.into(),
 			);
 		}
 	};
@@ -81,7 +85,8 @@ pub async fn get_public_user_info(
 		Packet::Ok(GetUserInfoResponse {
 			username: user.username,
 			permission_level,
-		}),
+		})
+		.into(),
 	)
 }
 
@@ -91,11 +96,11 @@ pub async fn create_item_model(
 	cookie_jar: CookieJar,
 	Extension(session): Extension<session::Model>,
 	Json(create_item_model_request): Json<CreateItemModelRequest>,
-) -> (StatusCode, CookieJar, Packet<()>) {
+) -> (StatusCode, CookieJar, ResponsePacket<()>) {
 	let (get_user_info_status_code, user_info) =
 		get_public_user_info(state.clone(), Path(session.user_id)).await;
 
-	match user_info {
+	match user_info.0 {
 		Packet::Ok(get_user_info_response) => {
 			if get_user_info_response.permission_level < PermissionLevel::Admin {
 				return (
@@ -103,11 +108,18 @@ pub async fn create_item_model(
 					cookie_jar,
 					Packet::Error(ErrorPacket {
 						message: "Insufficient permissions".to_owned(),
-					}),
+					})
+					.into(),
 				);
 			}
 		}
-		Packet::Error(err) => return (get_user_info_status_code, cookie_jar, Packet::Error(err)),
+		Packet::Error(err) => {
+			return (
+				get_user_info_status_code,
+				cookie_jar,
+				Packet::Error(err).into(),
+			);
+		}
 	}
 
 	if let Err(err) = ItemModel::insert(item_model::ActiveModel {
@@ -125,24 +137,26 @@ pub async fn create_item_model(
 			cookie_jar,
 			Packet::Error(ErrorPacket {
 				message: "Something went wrong".to_owned(),
-			}),
+			})
+			.into(),
 		);
 	}
 
-	(StatusCode::CREATED, cookie_jar, Packet::Ok(()))
+	(StatusCode::CREATED, cookie_jar, Packet::Ok(()).into())
 }
 
 #[tracing::instrument]
 pub async fn create_user_unchecked(
 	db: &DatabaseConnection,
 	create_user_request: CreateUserRequest,
-) -> (StatusCode, Packet<()>) {
+) -> (StatusCode, ResponsePacket<()>) {
 	if !EMAIL_REGEX.is_match(create_user_request.email.as_str()) {
 		return (
 			StatusCode::BAD_REQUEST,
 			Packet::Error(ErrorPacket {
 				message: "Invalid email".to_owned(),
-			}),
+			})
+			.into(),
 		);
 	}
 
@@ -157,7 +171,8 @@ pub async fn create_user_unchecked(
 				StatusCode::INTERNAL_SERVER_ERROR,
 				Packet::Error(ErrorPacket {
 					message: "Something went wrong".to_owned(),
-				}),
+				})
+				.into(),
 			);
 		}
 	};
@@ -180,12 +195,13 @@ pub async fn create_user_unchecked(
 				StatusCode::INTERNAL_SERVER_ERROR,
 				Packet::Error(ErrorPacket {
 					message: "Failed to insert into database".to_owned(),
-				}),
+				})
+				.into(),
 			);
 		}
 	};
 
-	(StatusCode::CREATED, Packet::Ok(()))
+	(StatusCode::CREATED, Packet::Ok(()).into())
 }
 
 #[tracing::instrument]
@@ -193,23 +209,24 @@ pub async fn create_user(
 	state: State<DatabaseConnection>,
 	Extension(session): Extension<session::Model>,
 	Json(create_user_request): Json<CreateUserRequest>,
-) -> (StatusCode, Packet<()>) {
+) -> (StatusCode, ResponsePacket<()>) {
 	// todo add proper validation for this and other functions (db insertions)
 
 	let (status_code, user_info) = get_public_user_info(state.clone(), Path(session.user_id)).await;
 
-	match user_info {
+	match user_info.0 {
 		Packet::Ok(get_user_info_response) => {
 			if get_user_info_response.permission_level < PermissionLevel::Admin {
 				return (
 					StatusCode::FORBIDDEN,
 					Packet::Error(ErrorPacket {
 						message: "Insufficient permissions".to_owned(),
-					}),
+					})
+					.into(),
 				);
 			}
 		}
-		Packet::Error(err) => return (status_code, Packet::Error(err)),
+		Packet::Error(err) => return (status_code, Packet::Error(err).into()),
 	}
 
 	create_user_unchecked(&state.0, create_user_request).await
@@ -244,7 +261,7 @@ pub async fn login(
 	state: State<DatabaseConnection>,
 	cookie_jar: CookieJar,
 	Json(login_request): Json<LoginRequest>,
-) -> (StatusCode, CookieJar, Packet<()>) {
+) -> (StatusCode, CookieJar, ResponsePacket<()>) {
 	let mut user_found = true;
 
 	let user: user::Model = match User::find()
@@ -274,7 +291,8 @@ pub async fn login(
 				cookie_jar,
 				Packet::Error(ErrorPacket {
 					message: "Something went wrong".to_owned(),
-				}),
+				})
+				.into(),
 			);
 		}
 	};
@@ -288,7 +306,8 @@ pub async fn login(
 				cookie_jar,
 				Packet::Error(ErrorPacket {
 					message: "Something went wrong".to_owned(),
-				}),
+				})
+				.into(),
 			);
 		}
 	};
@@ -301,7 +320,8 @@ pub async fn login(
 				cookie_jar,
 				Packet::Error(ErrorPacket {
 					message: "Invalid username or password".to_owned(),
-				}),
+				})
+				.into(),
 			),
 			_ => {
 				tracing::error!(%err, "Failed to verify password");
@@ -310,7 +330,8 @@ pub async fn login(
 					cookie_jar,
 					Packet::Error(ErrorPacket {
 						message: "Something went wrong".to_owned(),
-					}),
+					})
+					.into(),
 				)
 			}
 		};
@@ -323,7 +344,8 @@ pub async fn login(
 			cookie_jar,
 			Packet::Error(ErrorPacket {
 				message: "Invalid username or password".to_owned(),
-			}),
+			})
+			.into(),
 		);
 	}
 
@@ -348,7 +370,8 @@ pub async fn login(
 				cookie_jar,
 				Packet::Error(ErrorPacket {
 					message: "Something went wrong".to_owned(),
-				}),
+				})
+				.into(),
 			);
 		}
 	};
@@ -361,7 +384,7 @@ pub async fn login(
 			.same_site(SameSite::Lax),
 	);
 
-	(StatusCode::CREATED, cookie_jar, Packet::Ok(()))
+	(StatusCode::CREATED, cookie_jar, Packet::Ok(()).into())
 }
 
 #[tracing::instrument]
