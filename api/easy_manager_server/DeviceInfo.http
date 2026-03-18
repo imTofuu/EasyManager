@@ -25,7 +25,7 @@ Content-Type: application/json
 ###
 
 #@name login_root
-POST 127.0.0.1:3000/login
+POST https://api.easy.drewbryan.org/login
 client-version: 0.1.0
 Content-Type: application/json
 

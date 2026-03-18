@@ -7,14 +7,14 @@ pub const CLIENT_VERSION_HN: &str = "client-version";
 #[derive(Debug, Clone)]
 pub enum PacketError {
 	MissingHeader(String),
-	InvalidVersion(String),
+	InvalidVersion(String)
 }
 
 impl Display for PacketError {
 	fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), core::fmt::Error> {
 		match self {
 			PacketError::MissingHeader(header_name) => write!(f, "{header_name}"),
-			PacketError::InvalidVersion(version) => write!(f, "{version:?}"),
+			PacketError::InvalidVersion(version) => write!(f, "{version:?}")
 		}
 	}
 }
@@ -23,22 +23,23 @@ impl Error for PacketError {}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ErrorPacket {
-	pub message: String,
+	pub message: String
 }
 
 pub enum Packet<T: serde::Serialize + serde::de::DeserializeOwned> {
 	Ok(T),
-	Error(ErrorPacket),
+	Error(ErrorPacket)
 }
 
 pub mod get {
 	use alloc::string::String;
+
 	use crate::PermissionLevel;
 
 	#[derive(Debug, serde::Serialize, serde::Deserialize)]
 	pub struct GetUserInfoResponse {
-		pub username: String,
-		pub permission_level: PermissionLevel,
+		pub username:         String,
+		pub permission_level: PermissionLevel
 	}
 }
 
@@ -46,32 +47,33 @@ pub mod post {
 	use alloc::borrow::ToOwned;
 	use alloc::string::String;
 	use core::fmt::{Debug, Formatter};
+
 	use crate::{AccountIdentifier, PermissionLevel};
 
 	#[derive(serde::Serialize, serde::Deserialize)]
 	pub struct LoginRequest {
 		pub account_identifier: AccountIdentifier,
-		pub password: String,
+		pub password:           String
 	}
 
 	#[derive(serde::Serialize, serde::Deserialize)]
 	pub struct LoginResponse {
-		pub session_id: String,
+		pub session_id: String
 	}
 
 	#[derive(serde::Serialize, serde::Deserialize)]
 	pub struct CreateUserRequest {
-		pub email: String,
-		pub username: String,
-		pub password: String,
-		pub permission_level: PermissionLevel,
+		pub email:            String,
+		pub username:         String,
+		pub password:         String,
+		pub permission_level: PermissionLevel
 	}
 
 	#[derive(Debug, serde::Serialize, serde::Deserialize)]
 	pub struct CreateItemModelRequest {
-		pub name: String,
-		pub description: Option<String>,
-		pub permission_level: PermissionLevel,
+		pub name:             String,
+		pub description:      Option<String>,
+		pub permission_level: PermissionLevel
 	}
 
 	impl Debug for LoginRequest {

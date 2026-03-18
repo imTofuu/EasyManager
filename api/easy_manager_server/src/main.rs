@@ -3,8 +3,9 @@
 mod endpoints;
 mod entity;
 
-use crate::endpoints::create_user_unchecked;
-use crate::entity::prelude::Session;
+use std::io;
+use std::str::FromStr;
+
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Request, Response, StatusCode};
@@ -18,12 +19,13 @@ use easy_manager_core::packets::post::CreateUserRequest;
 use easy_manager_core::packets::{CLIENT_VERSION_HN, ErrorPacket, Packet, PacketError};
 use migration::MigratorTrait;
 use sea_orm::{DatabaseConnection, EntityTrait};
-use std::io;
-use std::str::FromStr;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
+
+use crate::endpoints::create_user_unchecked;
+use crate::entity::prelude::Session;
 
 #[tracing::instrument]
 fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
@@ -32,7 +34,7 @@ fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
 	exe_path.pop();
 
 	let (file_writer, file_guard) = tracing_appender::non_blocking(
-		tracing_appender::rolling::daily(exe_path.join("logs"), "easy_manager_server"),
+		tracing_appender::rolling::daily(exe_path.join("logs"), "easy_manager_server")
 	);
 
 	let file_layer = tracing_subscriber::fmt::layer()
@@ -44,7 +46,7 @@ fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
 				tracing::Level::DEBUG
 			} else {
 				tracing::Level::INFO
-			},
+			}
 		));
 
 	let cout_layer = tracing_subscriber::fmt::layer()
@@ -55,7 +57,7 @@ fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
 				tracing::Level::DEBUG
 			} else {
 				tracing::Level::INFO
-			}),
+			})
 		));
 
 	tracing_subscriber::Registry::default()
@@ -74,15 +76,13 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> IntoResponse for Respons
 	fn into_response(self) -> axum::response::Response {
 		match self.0 {
 			Packet::Ok(val) => axum::Json(val).into_response(),
-			Packet::Error(error_packet) => axum::Json(error_packet).into_response(),
+			Packet::Error(error_packet) => axum::Json(error_packet).into_response()
 		}
 	}
 }
 
 impl<T: serde::Serialize + serde::de::DeserializeOwned> From<Packet<T>> for ResponsePacket<T> {
-	fn from(value: Packet<T>) -> Self {
-		Self(value)
-	}
+	fn from(value: Packet<T>) -> Self { Self(value) }
 }
 
 #[tracing::instrument]
@@ -90,71 +90,75 @@ async fn auth_middleware(
 	state: State<DatabaseConnection>,
 	cookie_jar: CookieJar,
 	mut req: Request<Body>,
-	next: Next,
+	next: Next
 ) -> Response<Body> {
 	let session_id: Uuid = match cookie_jar.get("session") {
-		Some(session_id) => match Uuid::from_str(session_id.value()) {
-			Ok(session_id) => session_id,
-			Err(_) => {
-				let (_, cookie_jar) = endpoints::logout(state, cookie_jar).await;
-				return (
-					StatusCode::UNAUTHORIZED,
-					cookie_jar,
-					ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
-						message: "Invalid session, please login again".to_owned(),
-					})),
-				)
-					.into_response();
+		Some(session_id) => {
+			match Uuid::from_str(session_id.value()) {
+				Ok(session_id) => session_id,
+				Err(_) => {
+					let (_, cookie_jar) = endpoints::logout(state, cookie_jar).await;
+					return (
+						StatusCode::UNAUTHORIZED,
+						cookie_jar,
+						ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
+							message: "Invalid session, please login again".to_owned()
+						}))
+					)
+						.into_response();
+				}
 			}
-		},
+		}
 		None => {
 			return (
 				StatusCode::UNAUTHORIZED,
 				cookie_jar,
 				ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
-					message: "Please login".to_owned(),
-				})),
+					message: "Please login".to_owned()
+				}))
 			)
 				.into_response();
 		}
 	};
 
 	let session = match Session::find_by_id(session_id).one(&state.0).await {
-		Ok(session) => match session {
-			Some(session) => {
-				if session.expired {
+		Ok(session) => {
+			match session {
+				Some(session) => {
+					if session.expired {
+						let (_, cookie_jar) = endpoints::logout(state, cookie_jar).await;
+						return (
+							StatusCode::FORBIDDEN,
+							cookie_jar,
+							ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
+								message: "Session is expired, please login again".to_owned()
+							}))
+						)
+							.into_response();
+					}
+					session
+				}
+				None => {
 					let (_, cookie_jar) = endpoints::logout(state, cookie_jar).await;
 					return (
 						StatusCode::FORBIDDEN,
 						cookie_jar,
 						ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
-							message: "Session is expired, please login again".to_owned(),
-						})),
+							message: "Session is not found, please login again".to_owned()
+						}))
 					)
 						.into_response();
 				}
-				session
 			}
-			None => {
-				let (_, cookie_jar) = endpoints::logout(state, cookie_jar).await;
-				return (
-					StatusCode::FORBIDDEN,
-					cookie_jar,
-					ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
-						message: "Session is not found, please login again".to_owned(),
-					})),
-				)
-					.into_response();
-			}
-		},
+		}
 		Err(err) => {
 			tracing::error!(%err, "An error occurred validating a session");
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
 				cookie_jar,
 				ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
-					message: "Something went wrong validating the session".to_owned(),
-				})),
+					message: "Something went wrong validating the session".to_owned()
+				}))
 			)
 				.into_response();
 		}
@@ -174,7 +178,7 @@ pub fn validate_packet(headers: &axum::http::HeaderMap) -> Result<(), PacketErro
 			client_version
 				.to_str()
 				.unwrap_or("Unknown version")
-				.to_owned(),
+				.to_owned()
 		))
 	} else {
 		Ok(())
@@ -184,24 +188,30 @@ pub fn validate_packet(headers: &axum::http::HeaderMap) -> Result<(), PacketErro
 async fn packet_validation_middleware(req: Request<Body>, next: Next) -> Response<Body> {
 	match validate_packet(req.headers()) {
 		Ok(_) => next.run(req).await,
-		Err(err) => match err {
-			PacketError::MissingHeader(header_name) => (
-				StatusCode::BAD_REQUEST,
-				axum::Json(serde_json::json!({
-					"message": "Header missing from packet.",
-					"header_name": header_name.as_str()
-				})),
-			)
-				.into_response(),
-			PacketError::InvalidVersion(_) => (
-				StatusCode::UPGRADE_REQUIRED,
-				axum::Json(serde_json::json!({
-					"message": "Invalid client version.",
-					"required_version": env!("CARGO_PKG_VERSION")
-				})),
-			)
-				.into_response(),
-		},
+		Err(err) => {
+			match err {
+				PacketError::MissingHeader(header_name) => {
+					(
+						StatusCode::BAD_REQUEST,
+						axum::Json(serde_json::json!({
+							"message": "Header missing from packet.",
+							"header_name": header_name.as_str()
+						}))
+					)
+						.into_response()
+				}
+				PacketError::InvalidVersion(_) => {
+					(
+						StatusCode::UPGRADE_REQUIRED,
+						axum::Json(serde_json::json!({
+							"message": "Invalid client version.",
+							"required_version": env!("CARGO_PKG_VERSION")
+						}))
+					)
+						.into_response()
+				}
+			}
+		}
 	}
 }
 
@@ -210,7 +220,7 @@ async fn packet_validation_middleware(req: Request<Body>, next: Next) -> Respons
 enum EasyManagerError {
 	Socket(io::Error),
 	Database(sea_orm::DbErr),
-	Http(io::Error),
+	Http(io::Error)
 }
 
 #[tracing::instrument]
@@ -239,15 +249,12 @@ async fn main() -> Result<(), EasyManagerError> {
 	tracing::debug!("Migration complete");
 
 	// Create default admin user
-	create_user_unchecked(
-		&db_connection,
-		CreateUserRequest {
-			email: "admin@admin.com".to_owned(),
-			username: "admin".to_owned(),
-			password: "admin".to_owned(),
-			permission_level: PermissionLevel::Admin,
-		},
-	)
+	create_user_unchecked(&db_connection, CreateUserRequest {
+		email:            "admin@admin.com".to_owned(),
+		username:         "admin".to_owned(),
+		password:         "admin".to_owned(),
+		permission_level: PermissionLevel::Admin
+	})
 	.await;
 
 	// Define HTTP handlers
@@ -256,7 +263,7 @@ async fn main() -> Result<(), EasyManagerError> {
 		.route("/user", method_routing::post(endpoints::create_user))
 		.layer(middleware::from_fn_with_state(
 			db_connection.clone(),
-			auth_middleware,
+			auth_middleware
 		))
 		.with_state(db_connection.clone());
 
@@ -264,7 +271,7 @@ async fn main() -> Result<(), EasyManagerError> {
 		.route("/ping", method_routing::get(endpoints::ping))
 		.route(
 			"/user/{user_id}",
-			method_routing::get(endpoints::get_public_user_info),
+			method_routing::get(endpoints::get_public_user_info)
 		)
 		.route("/login", method_routing::post(endpoints::login))
 		.route("/logout", method_routing::post(endpoints::logout))

@@ -6,26 +6,24 @@ use sea_orm::entity::prelude::*;
 #[sea_orm(table_name = "user")]
 pub struct Model {
 	#[sea_orm(primary_key, auto_increment = false)]
-	pub user_id: Uuid,
+	pub user_id:          Uuid,
 	#[sea_orm(unique)]
-	pub username: String,
+	pub username:         String,
 	#[sea_orm(unique)]
-	pub email: String,
-	pub password: String,
+	pub email:            String,
+	pub password:         String,
 	pub permission_level: String,
-	pub created_at: DateTimeWithTimeZone,
+	pub created_at:       DateTimeWithTimeZone
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
 	#[sea_orm(has_many = "super::session::Entity")]
-	Session,
+	Session
 }
 
 impl Related<super::session::Entity> for Entity {
-	fn to() -> RelationDef {
-		Relation::Session.def()
-	}
+	fn to() -> RelationDef { Relation::Session.def() }
 }
 
 impl ActiveModelBehavior for ActiveModel {}

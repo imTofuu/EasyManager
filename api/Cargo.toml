@@ -1,4 +1,7 @@
 [workspace]
-members = ["easy_manager_server", "easy_manager_core"]
-exclude = ["easy_manager_session_generator"]
+members = [
+    "easy_manager_core",
+    "easy_manager_server",
+]
+exclude = ["easy_manager_physical_interface"]
 resolver = "3"

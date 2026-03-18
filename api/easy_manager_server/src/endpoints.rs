@@ -1,6 +1,5 @@
-use crate::ResponsePacket;
-use crate::entity::prelude::{ItemModel, Session, User};
-use crate::entity::{item_model, session, user};
+use std::str::FromStr;
+
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{Error, SaltString};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
@@ -16,11 +15,12 @@ use easy_manager_core::{AccountIdentifier, PermissionLevel};
 use migration::Expr;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use sea_orm::QueryFilter;
-use sea_orm::{ColumnTrait, DatabaseConnection};
-use sea_orm::{EntityTrait, NotSet, Set};
-use std::str::FromStr;
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, NotSet, QueryFilter, Set};
 use uuid::Uuid;
+
+use crate::ResponsePacket;
+use crate::entity::prelude::{ItemModel, Session, User};
+use crate::entity::{item_model, session, user};
 
 static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| {
 	Regex::new(r#"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"#)
@@ -38,30 +38,32 @@ static DUMMY_PASSWORD_HASH: Lazy<String> = Lazy::new(|| {
 #[tracing::instrument]
 pub async fn get_public_user_info(
 	state: State<DatabaseConnection>,
-	Path(user_id): Path<Uuid>,
+	Path(user_id): Path<Uuid>
 ) -> (StatusCode, ResponsePacket<GetUserInfoResponse>) {
 	let user: user::Model = match User::find_by_id(user_id).one(&state.0).await {
-		Ok(user) => match user {
-			Some(user) => user,
-			None => {
-				tracing::error!("I dont event know what happened here");
-				return (
-					StatusCode::INTERNAL_SERVER_ERROR,
-					Packet::Error(ErrorPacket {
-						message: "Something went wrong".to_owned(),
-					})
-					.into(),
-				);
+		Ok(user) => {
+			match user {
+				Some(user) => user,
+				None => {
+					tracing::error!("I dont event know what happened here");
+					return (
+						StatusCode::INTERNAL_SERVER_ERROR,
+						Packet::Error(ErrorPacket {
+							message: "Something went wrong".to_owned()
+						})
+						.into()
+					);
+				}
 			}
-		},
+		}
 		Err(err) => {
 			tracing::error!(%err, "Failed to get user from session model");
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
 				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
+					message: "Something went wrong".to_owned()
 				})
-				.into(),
+				.into()
 			);
 		}
 	};
@@ -73,9 +75,9 @@ pub async fn get_public_user_info(
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
 				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
+					message: "Something went wrong".to_owned()
 				})
-				.into(),
+				.into()
 			);
 		}
 	};
@@ -84,9 +86,9 @@ pub async fn get_public_user_info(
 		StatusCode::OK,
 		Packet::Ok(GetUserInfoResponse {
 			username: user.username,
-			permission_level,
+			permission_level
 		})
-		.into(),
+		.into()
 	)
 }
 
@@ -95,7 +97,7 @@ pub async fn create_item_model(
 	state: State<DatabaseConnection>,
 	cookie_jar: CookieJar,
 	Extension(session): Extension<session::Model>,
-	Json(create_item_model_request): Json<CreateItemModelRequest>,
+	Json(create_item_model_request): Json<CreateItemModelRequest>
 ) -> (StatusCode, CookieJar, ResponsePacket<()>) {
 	let (get_user_info_status_code, user_info) =
 		get_public_user_info(state.clone(), Path(session.user_id)).await;
@@ -107,9 +109,9 @@ pub async fn create_item_model(
 					StatusCode::FORBIDDEN,
 					cookie_jar,
 					Packet::Error(ErrorPacket {
-						message: "Insufficient permissions".to_owned(),
+						message: "Insufficient permissions".to_owned()
 					})
-					.into(),
+					.into()
 				);
 			}
 		}
@@ -117,16 +119,16 @@ pub async fn create_item_model(
 			return (
 				get_user_info_status_code,
 				cookie_jar,
-				Packet::Error(err).into(),
+				Packet::Error(err).into()
 			);
 		}
 	}
 
 	if let Err(err) = ItemModel::insert(item_model::ActiveModel {
-		item_model_id: Set(Uuid::new_v4()),
-		name: Set(create_item_model_request.name),
-		description: Set(create_item_model_request.description),
-		permission_level: Set(create_item_model_request.permission_level.into()),
+		item_model_id:    Set(Uuid::new_v4()),
+		name:             Set(create_item_model_request.name),
+		description:      Set(create_item_model_request.description),
+		permission_level: Set(create_item_model_request.permission_level.into())
 	})
 	.exec(&state.0)
 	.await
@@ -136,9 +138,9 @@ pub async fn create_item_model(
 			StatusCode::INTERNAL_SERVER_ERROR,
 			cookie_jar,
 			Packet::Error(ErrorPacket {
-				message: "Something went wrong".to_owned(),
+				message: "Something went wrong".to_owned()
 			})
-			.into(),
+			.into()
 		);
 	}
 
@@ -148,15 +150,15 @@ pub async fn create_item_model(
 #[tracing::instrument]
 pub async fn create_user_unchecked(
 	db: &DatabaseConnection,
-	create_user_request: CreateUserRequest,
+	create_user_request: CreateUserRequest
 ) -> (StatusCode, ResponsePacket<()>) {
 	if !EMAIL_REGEX.is_match(create_user_request.email.as_str()) {
 		return (
 			StatusCode::BAD_REQUEST,
 			Packet::Error(ErrorPacket {
-				message: "Invalid email".to_owned(),
+				message: "Invalid email".to_owned()
 			})
-			.into(),
+			.into()
 		);
 	}
 
@@ -170,20 +172,20 @@ pub async fn create_user_unchecked(
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
 				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
+					message: "Something went wrong".to_owned()
 				})
-				.into(),
+				.into()
 			);
 		}
 	};
 
 	match User::insert(user::ActiveModel {
-		user_id: Set(Uuid::new_v4()),
-		email: Set(create_user_request.email),
-		username: Set(create_user_request.username.clone()),
-		password: Set(password_hash),
+		user_id:          Set(Uuid::new_v4()),
+		email:            Set(create_user_request.email),
+		username:         Set(create_user_request.username.clone()),
+		password:         Set(password_hash),
 		permission_level: Set(create_user_request.permission_level.into()),
-		created_at: Default::default(),
+		created_at:       Default::default()
 	})
 	.exec(db)
 	.await
@@ -194,9 +196,9 @@ pub async fn create_user_unchecked(
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
 				Packet::Error(ErrorPacket {
-					message: "Failed to insert into database".to_owned(),
+					message: "Failed to insert into database".to_owned()
 				})
-				.into(),
+				.into()
 			);
 		}
 	};
@@ -208,7 +210,7 @@ pub async fn create_user_unchecked(
 pub async fn create_user(
 	state: State<DatabaseConnection>,
 	Extension(session): Extension<session::Model>,
-	Json(create_user_request): Json<CreateUserRequest>,
+	Json(create_user_request): Json<CreateUserRequest>
 ) -> (StatusCode, ResponsePacket<()>) {
 	// todo add proper validation for this and other functions (db insertions)
 
@@ -220,13 +222,13 @@ pub async fn create_user(
 				return (
 					StatusCode::FORBIDDEN,
 					Packet::Error(ErrorPacket {
-						message: "Insufficient permissions".to_owned(),
+						message: "Insufficient permissions".to_owned()
 					})
-					.into(),
+					.into()
 				);
 			}
 		}
-		Packet::Error(err) => return (status_code, Packet::Error(err).into()),
+		Packet::Error(err) => return (status_code, Packet::Error(err).into())
 	}
 
 	create_user_unchecked(&state.0, create_user_request).await
@@ -235,11 +237,11 @@ pub async fn create_user(
 #[tracing::instrument]
 pub async fn logout(
 	state: State<DatabaseConnection>,
-	cookie_jar: CookieJar,
+	cookie_jar: CookieJar
 ) -> (StatusCode, CookieJar) {
 	let session_id: Option<Uuid> = match cookie_jar.get("session") {
 		Some(session_id) => Uuid::from_str(session_id.value()).ok(),
-		None => return (StatusCode::NO_CONTENT, cookie_jar),
+		None => return (StatusCode::NO_CONTENT, cookie_jar)
 	};
 
 	if let Some(session_id) = session_id
@@ -260,39 +262,41 @@ pub async fn logout(
 pub async fn login(
 	state: State<DatabaseConnection>,
 	cookie_jar: CookieJar,
-	Json(login_request): Json<LoginRequest>,
+	Json(login_request): Json<LoginRequest>
 ) -> (StatusCode, CookieJar, ResponsePacket<()>) {
 	let mut user_found = true;
 
 	let user: user::Model = match User::find()
 		.filter(match login_request.account_identifier {
 			AccountIdentifier::Email { email } => user::Column::Email.eq(email),
-			AccountIdentifier::Username { username } => user::Column::Username.eq(username),
+			AccountIdentifier::Username { username } => user::Column::Username.eq(username)
 		})
 		.one(&state.0)
 		.await
 	{
 		// a redundant password check should be made to prevent timing attacks
-		Ok(user) => user.unwrap_or_else(|| {
-			user_found = false;
-			user::Model {
-				user_id: Uuid::new_v4(),
-				email: "email@email.com".to_owned(),
-				username: "lmao".to_owned(),
-				password: DUMMY_PASSWORD_HASH.clone(),
-				permission_level: PermissionLevel::Default.into(),
-				created_at: Default::default(),
-			}
-		}),
+		Ok(user) => {
+			user.unwrap_or_else(|| {
+				user_found = false;
+				user::Model {
+					user_id:          Uuid::new_v4(),
+					email:            "email@email.com".to_owned(),
+					username:         "lmao".to_owned(),
+					password:         DUMMY_PASSWORD_HASH.clone(),
+					permission_level: PermissionLevel::Default.into(),
+					created_at:       Default::default()
+				}
+			})
+		}
 		Err(err) => {
 			tracing::error!(%err, "Failed to fetch user record from database");
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
 				cookie_jar,
 				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
+					message: "Something went wrong".to_owned()
 				})
-				.into(),
+				.into()
 			);
 		}
 	};
@@ -305,9 +309,9 @@ pub async fn login(
 				StatusCode::INTERNAL_SERVER_ERROR,
 				cookie_jar,
 				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
+					message: "Something went wrong".to_owned()
 				})
-				.into(),
+				.into()
 			);
 		}
 	};
@@ -315,37 +319,40 @@ pub async fn login(
 		Argon2::default().verify_password(login_request.password.as_bytes(), &password_hash)
 	{
 		return match err {
-			Error::Password => (
-				StatusCode::UNAUTHORIZED,
-				cookie_jar,
-				Packet::Error(ErrorPacket {
-					message: "Invalid username or password".to_owned(),
-				})
-				.into(),
-			),
+			Error::Password => {
+				(
+					StatusCode::UNAUTHORIZED,
+					cookie_jar,
+					Packet::Error(ErrorPacket {
+						message: "Invalid username or password".to_owned()
+					})
+					.into()
+				)
+			}
 			_ => {
 				tracing::error!(%err, "Failed to verify password");
 				(
 					StatusCode::INTERNAL_SERVER_ERROR,
 					cookie_jar,
 					Packet::Error(ErrorPacket {
-						message: "Something went wrong".to_owned(),
+						message: "Something went wrong".to_owned()
 					})
-					.into(),
+					.into()
 				)
 			}
 		};
 	}
 
-	// Case for if the user isn't found but the password they entered was the same as the dummy
+	// Case for if the user isn't found but the password they entered was the same
+	// as the dummy
 	if !user_found {
 		return (
 			StatusCode::UNAUTHORIZED,
 			cookie_jar,
 			Packet::Error(ErrorPacket {
-				message: "Invalid username or password".to_owned(),
+				message: "Invalid username or password".to_owned()
 			})
-			.into(),
+			.into()
 		);
 	}
 
@@ -355,9 +362,9 @@ pub async fn login(
 
 	let insert = match Session::insert(session::ActiveModel {
 		session_id: Set(Uuid::new_v4()),
-		user_id: Set(user.user_id),
+		user_id:    Set(user.user_id),
 		created_at: NotSet,
-		expired: NotSet,
+		expired:    NotSet
 	})
 	.exec(&state.0)
 	.await
@@ -369,9 +376,9 @@ pub async fn login(
 				StatusCode::INTERNAL_SERVER_ERROR,
 				cookie_jar,
 				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
+					message: "Something went wrong".to_owned()
 				})
-				.into(),
+				.into()
 			);
 		}
 	};
@@ -381,13 +388,11 @@ pub async fn login(
 			.path("/")
 			.http_only(true)
 			.secure(std::env::var("IS_DEV").map(|_| false).unwrap_or(true))
-			.same_site(SameSite::Lax),
+			.same_site(SameSite::Lax)
 	);
 
 	(StatusCode::CREATED, cookie_jar, Packet::Ok(()).into())
 }
 
 #[tracing::instrument]
-pub async fn ping() -> StatusCode {
-	StatusCode::OK
-}
+pub async fn ping() -> StatusCode { StatusCode::OK }

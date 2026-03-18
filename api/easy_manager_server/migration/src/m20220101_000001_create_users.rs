@@ -11,7 +11,7 @@ pub enum User {
 	Username,
 	Password,
 	PermissionLevel,
-	CreatedAt,
+	CreatedAt
 }
 
 #[async_trait::async_trait]
@@ -27,7 +27,7 @@ impl MigrationTrait for Migration {
 						ColumnDef::new(User::Username)
 							.string()
 							.unique_key()
-							.not_null(),
+							.not_null()
 					)
 					.col(ColumnDef::new(User::Email).string().unique_key().not_null())
 					.col(ColumnDef::new(User::Password).string().not_null())
@@ -36,9 +36,9 @@ impl MigrationTrait for Migration {
 						ColumnDef::new(User::CreatedAt)
 							.timestamp_with_time_zone()
 							.default(Expr::current_timestamp())
-							.not_null(),
+							.not_null()
 					)
-					.to_owned(),
+					.to_owned()
 			)
 			.await
 	}
