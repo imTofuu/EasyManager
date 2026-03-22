@@ -1,7 +1,9 @@
-use std::ffi::{CString, c_int, c_uchar};
+use std::ffi::{CStr, CString, c_int, c_uchar};
 use std::panic;
 use std::panic::PanicHookInfo;
+use std::str::FromStr;
 
+use anyhow::Context;
 use embassy_executor::Spawner;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::gpio::{Gpio0, Gpio1};
@@ -10,11 +12,17 @@ use esp_idf_svc::hal::uart::config::Config;
 use esp_idf_svc::hal::uart::{AsyncUartDriver, UartDriver};
 use esp_idf_svc::hal::units::Hertz;
 use esp_idf_svc::io::asynch::{Read, Write};
-use esp_idf_svc::nvs::EspDefaultNvsPartition;
-use esp_idf_svc::sys::{EspError, esp_eap_client_set_identity, esp_eap_client_set_username};
+use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
+use esp_idf_svc::sys::{
+	esp_eap_client_set_identity,
+	esp_eap_client_set_password,
+	esp_eap_client_set_username,
+	esp_wifi_sta_enterprise_disable,
+	esp_wifi_sta_enterprise_enable
+};
 use esp_idf_svc::timer::EspTaskTimerService;
 use esp_idf_svc::wifi::{AsyncWifi, AuthMethod, ClientConfiguration, Configuration, EspWifi};
-use log::{error, info};
+use log::{debug, error, info, warn};
 
 fn panic(panic_info: &PanicHookInfo) {
 	error!("Panicked:  {panic_info}");
@@ -51,18 +59,17 @@ async fn uart_read_line(
 }
 
 async fn create_new_wifi_config(
-	uart: &mut AsyncUartDriver<'static, UartDriver<'static>>
-) -> Configuration {
-	let auth_method;
+	uart: &mut AsyncUartDriver<'static, UartDriver<'static>>,
+	nvs: &mut EspNvs<NvsDefault>
+) -> Result<ClientConfiguration, anyhow::Error> {
+	let mut wifi_config = ClientConfiguration::default();
 
 	loop {
-		uart.write_all(c"\nEnter auth method: ".to_bytes())
-			.await
-			.unwrap_or_else(|err| panic!("Failed to write to uart ({err})"));
+		uart.write_all(c"\nEnter auth method: ".to_bytes()).await?;
 
 		match uart_read_line(uart, true).await.as_bytes() {
-			b"WPA" => auth_method = AuthMethod::WPA2Personal,
-			b"EAP" => auth_method = AuthMethod::WPA2Enterprise,
+			b"WPA" => wifi_config.auth_method = AuthMethod::WPA2Personal,
+			b"EAP" => wifi_config.auth_method = AuthMethod::WPA2Enterprise,
 			_ => {
 				error!("Unknown auth method");
 				continue;
@@ -71,18 +78,14 @@ async fn create_new_wifi_config(
 		break;
 	}
 
-	let ssid;
-
 	loop {
-		uart.write_all(c"\nEnter SSID: ".to_bytes())
-			.await
-			.unwrap_or_else(|err| panic!("Failed to write to uart ({err})"));
+		uart.write_all(c"\nEnter SSID: ".to_bytes()).await?;
 
 		match uart_read_line(uart, true).await.to_str() {
 			Ok(ok) => {
 				match ok.try_into() {
 					Ok(ok) => {
-						ssid = ok;
+						wifi_config.ssid = ok;
 						break;
 					}
 					Err(_) => error!("SSID is too long")
@@ -92,48 +95,35 @@ async fn create_new_wifi_config(
 		}
 	}
 
-	if let AuthMethod::WPA2Enterprise = auth_method {
-		uart.write_all(c"\nEnter identity: ".to_bytes())
-			.await
-			.unwrap_or_else(|err| panic!("Failed to write to uart ({err})"));
+	if let AuthMethod::WPA2Enterprise = wifi_config.auth_method {
+		uart.write_all(c"\nEnter identity: ".to_bytes()).await?;
 		let identity = uart_read_line(uart, true).await;
 
-		uart.write_all(c"\nEnter username: ".to_bytes())
-			.await
-			.unwrap_or_else(|err| panic!("Failed to write to uart ({err})"));
+		uart.write_all(c"\nEnter username: ".to_bytes()).await?;
 		let username = uart_read_line(uart, true).await;
 
-		unsafe {
-			// SAFETY: identity is guaranteed to be a valid c_str before this call
-			if let Err(err) = EspError::convert(esp_eap_client_set_identity(
-				identity.as_ptr() as *const c_uchar,
-				identity.count_bytes() as c_int
-			)) {
-				panic!("Failed to set EAP identity ({err})");
-			}
-
-			// SAFETY: username is guaranteed to be a valid c_str before this call
-			if let Err(err) = EspError::convert(esp_eap_client_set_username(
-				username.as_ptr() as *const c_uchar,
-				username.count_bytes() as c_int
-			)) {
-				panic!("Failed to set EAP username ({err})");
-			}
-		}
+		nvs.set_str(
+			"identity",
+			identity
+				.to_str()
+				.context("Converting identity to rust str")?
+		)?;
+		nvs.set_str(
+			"username",
+			username
+				.to_str()
+				.context("Converting username to rust str")?
+		)?;
 	}
 
-	let password;
-
 	loop {
-		uart.write_all(c"\nEnter password: ".to_bytes())
-			.await
-			.unwrap_or_else(|err| panic!("Failed to write to uart ({err})"));
+		uart.write_all(c"\nEnter password: ".to_bytes()).await?;
 
 		match uart_read_line(uart, false).await.to_str() {
 			Ok(input) => {
 				match input.try_into() {
 					Ok(s32_password) => {
-						password = s32_password;
+						wifi_config.password = s32_password;
 						break;
 					}
 					Err(_) => error!("Password is too long")
@@ -143,18 +133,204 @@ async fn create_new_wifi_config(
 		}
 	}
 
-	let wifi_config = Configuration::Client(ClientConfiguration {
-		ssid,
-		password,
-		auth_method,
-		..Default::default()
-	});
+	Ok(wifi_config)
+}
 
-	wifi_config
+async fn get_current_wifi_config(
+	wifi: &AsyncWifi<EspWifi<'static>>
+) -> Option<ClientConfiguration> {
+	match wifi.get_configuration() {
+		Ok(config) => {
+			match config {
+				Configuration::Client(config) => Some(config),
+				_ => None
+			}
+		}
+		Err(err) => {
+			error!("Failed to get previous WiFi config ({err})");
+			None
+		}
+	}
+}
+
+#[embassy_executor::task]
+async fn run_wifi(
+	mut wifi: AsyncWifi<EspWifi<'static>>,
+	mut uart: AsyncUartDriver<'static, UartDriver<'static>>,
+	mut nvs: EspNvs<NvsDefault>
+) -> ! {
+	// Setup WiFi until success
+	loop {
+		match get_current_wifi_config(&wifi).await {
+			Some(_) => debug!("Previous WiFi config found"),
+			None => {
+				warn!("Previous WiFi config is missing or invalid");
+				match create_new_wifi_config(&mut uart, &mut nvs).await {
+					Ok(config) => {
+						if let Err(err) = wifi.set_configuration(&Configuration::Client(config)) {
+							error!("Failed to apply config to WiFi driver ({err})");
+						}
+					}
+					Err(err) => {
+						error!("Failed to set new WiFi config ({err}); retrying");
+						continue;
+					}
+				};
+			}
+		}
+
+		if let Err(err) = wifi.start().await {
+			error!("Failed to start WiFi driver ({err}); retrying setup");
+			continue;
+		}
+
+		break;
+	}
+
+	info!("WiFi started");
+
+	loop {
+		// Get existing config or create a new one
+		let current_config = match get_current_wifi_config(&wifi).await {
+			Some(config) => {
+				debug!("Previous WiFi config found");
+				config
+			}
+			None => {
+				warn!("Previous WiFi config is missing or invalid");
+				match create_new_wifi_config(&mut uart, &mut nvs).await {
+					Ok(config) => {
+						if let Err(err) = wifi.set_configuration(&Configuration::Client(config)) {
+							error!("Failed to apply config to WiFi driver ({err})");
+						}
+						continue;
+					},
+					Err(err) => {
+						error!("Failed to set new WiFi config ({err}); retrying");
+						if let Err(err) = wifi.set_configuration(&Configuration::None) {
+							error!("Failed to reset WiFi config ({err})");
+						}
+						continue;
+					}
+				}
+			}
+		};
+
+		match current_config.auth_method {
+			AuthMethod::WPA2Personal => unsafe {
+				esp_wifi_sta_enterprise_disable();
+			},
+			AuthMethod::WPA2Enterprise => unsafe {
+				let mut identity = [0u8; 253];
+				if let Err(err) = nvs.get_str("identity", &mut identity) {
+					error!("Failed to get identity from NVS ({err})");
+					if let Err(err) = wifi.set_configuration(&Configuration::None) {
+						error!("Failed to reset WiFi config ({err})");
+					}
+					continue;
+				}
+
+				let c_identity = match CStr::from_bytes_until_nul(&identity) {
+					Ok(result) => result,
+					Err(err) => {
+						error!("Failed to parse identity as c-string ({err})");
+						if let Err(err) = wifi.set_configuration(&Configuration::None) {
+							error!("Failed to reset WiFi config ({err})");
+						}
+						continue;
+					}
+				};
+
+				esp_eap_client_set_identity(
+					c_identity.as_ptr() as *const c_uchar,
+					c_identity.count_bytes() as c_int
+				);
+
+				let mut username = [0u8; 253];
+				if let Err(err) = nvs.get_str("username", &mut username) {
+					error!("Failed to get username from NVS ({err})");
+					if let Err(err) = wifi.set_configuration(&Configuration::None) {
+						error!("Failed to reset WiFi config ({err})");
+					}
+					continue;
+				}
+
+				let c_username = match CStr::from_bytes_until_nul(&username) {
+					Ok(result) => result,
+					Err(err) => {
+						error!("Failed to parse username as c-string ({err})");
+						if let Err(err) = wifi.set_configuration(&Configuration::None) {
+							error!("Failed to reset WiFi config ({err})");
+						}
+						continue;
+					}
+				};
+
+				esp_eap_client_set_username(
+					c_username.as_ptr() as *const c_uchar,
+					c_username.count_bytes() as c_int
+				);
+
+				let c_password = match CString::from_str(current_config.password.as_str()) {
+					Ok(result) => result,
+					Err(err) => {
+						error!("Failed to parse password as c-string ({err})");
+						if let Err(err) = wifi.set_configuration(&Configuration::None) {
+							error!("Failed to reset WiFi config ({err})");
+						}
+						continue;
+					}
+				};
+
+				esp_eap_client_set_password(
+					c_password.as_ptr() as *const c_uchar,
+					c_password.count_bytes() as c_int
+				);
+
+				esp_wifi_sta_enterprise_enable();
+			},
+			_ => {
+				error!("Invalid auth method");
+				if let Err(err) = wifi.set_configuration(&Configuration::None) {
+					error!("Failed to reset WiFi config ({err})");
+				}
+				continue;
+			}
+		}
+
+		match wifi.connect().await {
+			Ok(()) => {
+				info!("WiFi connection succeeded");
+
+				if let Err(err) = wifi.wait_netif_up().await {
+					error!("Failed to wait for WiFi interface to go up ({err}); reconnecting");
+					continue;
+				}
+
+				debug!(
+					"Connection information: {:?}",
+					wifi.wifi().sta_netif().get_ip_info()
+				);
+
+				if let Err(err) = wifi.wifi_wait(|wifi| wifi.is_connected(), None).await {
+					error!("Failed to wait for disconnection ({err}); reconnecting");
+					continue;
+				}
+			}
+			Err(err) => {
+				error!("Failed WiFi connection: ({err}); resetting configuration");
+				if let Err(err) = wifi.set_configuration(&Configuration::None) {
+					error!("Failed to reset WiFi config ({err})");
+				}
+				continue;
+				
+			}
+		};
+	}
 }
 
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
+async fn main(spawner: Spawner) {
 	esp_idf_svc::sys::link_patches();
 
 	esp_idf_svc::log::init_from_esp_idf();
@@ -172,13 +348,15 @@ async fn main(_spawner: Spawner) {
 	let timer_service = EspTaskTimerService::new()
 		.unwrap_or_else(|err| panic!("Failed to create task timer service ({err})"));
 
+	info!("Gotten ESP services");
+
 	let uart_tx_pin = peripherals.pins.gpio1;
 	let uart_rx_pin = peripherals.pins.gpio3;
 
 	let mut uart_config = Config::new();
 	uart_config.baudrate = Hertz(115200);
 
-	let mut uart_driver = AsyncUartDriver::new(
+	let uart_driver = AsyncUartDriver::new(
 		peripherals.uart0,
 		uart_tx_pin,
 		uart_rx_pin,
@@ -188,55 +366,17 @@ async fn main(_spawner: Spawner) {
 	)
 	.unwrap_or_else(|err| panic!("Failed to create UART driver ({err})"));
 
-	info!("Gotten ESP services");
-
-	let mut wifi = AsyncWifi::wrap(
-		EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs))
+	let wifi = AsyncWifi::wrap(
+		EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs.clone()))
 			.unwrap_or_else(|err| panic!("Failed to create inner WiFi driver ({err})")),
 		sys_loop,
 		timer_service
 	)
 	.unwrap_or_else(|err| panic!("Failed to create WiFi driver ({err})"));
-	
-	match wifi.get_configuration() {
-		Ok(config) => {
-			if let Configuration::None = config {
-				info!("WiFi config was previously reset.");
-				wifi.set_configuration(&create_new_wifi_config(&mut uart_driver).await)
-					.unwrap_or_else(|err| panic!("Failed set set WiFi config ({err})"));
-			}
-		},
-		Err(_) => {
-			error!("Error getting WiFi config");
-			wifi.set_configuration(&create_new_wifi_config(&mut uart_driver).await)
-				.unwrap_or_else(|err| panic!("Failed set set WiFi config ({err})"));
-		}
-	}
 
-	wifi.start()
-		.await
-		.unwrap_or_else(|err| panic!("Failed to start WiFi ({err})"));
-	info!("WiFi started");
+	let wifi_nvs_partition = EspNvs::new(nvs, "wifi", true).expect("Failed to get NVS namespace");
 
-	wifi.connect().await.unwrap_or_else(|err| {
-		error!("Failed to connect to WiFi; resetting config");
-		wifi.set_configuration(&Configuration::None)
-			.unwrap_or_else(|err| panic!("Failed to reset WiFi config ({err})"));
-		panic!("Failed to connect to WiFi ({err})")
-	});
-	info!("WiFi connected");
-
-	wifi.wait_netif_up()
-		.await
-		.unwrap_or_else(|err| panic!("Failed to wait for WiFi interface to go up ({err})"));
-
-	info!(
-		"WiFi DHCP info: {:?}",
-		wifi.wifi()
-			.sta_netif()
-			.get_ip_info()
-			.unwrap_or_else(|err| panic!("Failed to get WiFi interface info ({err})"))
-	);
-	
-	wifi.stop().await.unwrap_or_else(|err| panic!("Failed to stop WiFi driver ({err})"));
+	spawner
+		.spawn(run_wifi(wifi, uart_driver, wifi_nvs_partition))
+		.expect("Failed to start WiFi task");
 }

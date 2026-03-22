@@ -397,6 +397,7 @@ dependencies = [
 name = "easy_manager_physical_interface"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "embassy-executor",
  "embassy-time",
  "embuild",

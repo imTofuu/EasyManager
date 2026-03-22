@@ -27,6 +27,7 @@ embassy-executor = {  version = "0.9.1", features = ["arch-std", "executor-threa
 # Remove `generic-queue-8` if you plan to use `embassy-time` WITH `embassy-executor`
 embassy-time = { version = "0.5", features = ["generic-queue-8"] }
 log = "0.4.29"
+anyhow = "1.0.102"
 
 [build-dependencies]
 embuild = "0.33"
