@@ -4,15 +4,27 @@ use std::panic;
 use std::panic::PanicHookInfo;
 use std::rc::Rc;
 use std::str::FromStr;
+
 use anyhow::Context;
 use easy_manager_core::get_core_version;
+use easy_manager_core::packets::CLIENT_VERSION_HN;
 use embassy_executor::Spawner;
 use embassy_time::Timer;
+use embedded_graphics::draw_target::DrawTarget;
+use embedded_graphics::geometry::Point;
+use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
+use embedded_graphics::primitives::{Circle, PrimitiveStyle, StyledDrawable};
 use embedded_svc::http::Method;
 use embedded_svc::http::client::Client;
+use esp_idf_hal::gpio::{Gpio19, OutputPin, Pin, PinId};
+use esp_idf_hal::spi::config::Duplex;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
-use esp_idf_svc::hal::gpio::{Gpio0, Gpio1};
+use esp_idf_svc::hal::delay::Delay;
+use esp_idf_svc::hal::gpio::{Gpio0, Gpio1, PinDriver};
 use esp_idf_svc::hal::peripherals::Peripherals;
+use esp_idf_svc::hal::spi;
+use esp_idf_svc::hal::spi::config::DriverConfig;
+use esp_idf_svc::hal::spi::{SpiDeviceDriver, SpiDriver};
 use esp_idf_svc::hal::uart::config::Config;
 use esp_idf_svc::hal::uart::{AsyncUartDriver, UartDriver};
 use esp_idf_svc::hal::units::Hertz;
@@ -35,7 +47,19 @@ use esp_idf_svc::wifi::{
 	EspWifi
 };
 use log::{debug, error, info, warn};
-use easy_manager_core::packets::CLIENT_VERSION_HN;
+use mipidsi::Builder;
+use mipidsi::interface::SpiInterface;
+use mipidsi::models::ST7789;
+
+struct SPIPinDriver<'d, MODE> {
+	inner: PinDriver<'d, MODE>
+}
+
+impl<'d, MODE> Pin for SPIPinDriver<'d, MODE> {
+	fn pin(&self) -> PinId { self.inner.pin() }
+}
+
+impl<'d, MODE> OutputPin for SPIPinDriver<'d, MODE> {}
 
 fn panic(panic_info: &PanicHookInfo) {
 	error!("Panicked:  {panic_info}");
@@ -328,7 +352,7 @@ async fn run_wifi(
 					error!("Failed to wait for WiFi interface to go up ({err}); reconnecting");
 					continue;
 				}
-				
+
 				is_connected.set(true);
 
 				debug!(
@@ -355,13 +379,13 @@ async fn run_wifi(
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
 	esp_idf_svc::sys::link_patches();
-	
+
 	esp_idf_svc::log::init_from_esp_idf();
-	
+
 	panic::set_hook(Box::new(panic));
-	
+
 	info!("starting...");
-	
+
 	let peripherals =
 		Peripherals::take().unwrap_or_else(|err| panic!("Failed to take peripherals ({err})"));
 	let sys_loop = EspSystemEventLoop::take()
@@ -370,15 +394,58 @@ async fn main(spawner: Spawner) {
 		.unwrap_or_else(|err| panic!("Failed to take NVS partition ({err})"));
 	let timer_service = EspTaskTimerService::new()
 		.unwrap_or_else(|err| panic!("Failed to create task timer service ({err})"));
-	
+
 	debug!("Gotten ESP services");
-	
+
+	let spi = SpiDriver::new(
+		peripherals.spi2,
+		peripherals.pins.gpio18,
+		peripherals.pins.gpio23,
+		None::<Gpio19>,
+		&DriverConfig::default()
+	)
+	.unwrap_or_else(|err| panic!("Failed to create SPI driver ({err})"));
+
+	let cs = SPIPinDriver {
+		inner: PinDriver::output(peripherals.pins.gpio5)
+			.unwrap_or_else(|err| panic!("Failed to create pin CS pin driver for LCD ({err})"))
+	};
+	let dc = PinDriver::output(peripherals.pins.gpio21)
+		.unwrap_or_else(|err| panic!("Failed to create pin DC pin driver for LCD ({err})"));
+	let rst = PinDriver::output(peripherals.pins.gpio22)
+		.unwrap_or_else(|err| panic!("Failed to create pin RST pin driver for LCD ({err})"));
+
+	let lcd_device_driver = SpiDeviceDriver::new(
+		spi,
+		Some(cs),
+		&spi::config::Config::default()
+			.baudrate(Hertz(80_000_000))
+			.duplex(Duplex::Half)
+	)
+	.unwrap_or_else(|err| panic!("Failed to create LCD SPI driver ({err})"));
+
+	let mut buf = [0u8; 2048];
+	let spi_interface = SpiInterface::new(lcd_device_driver, dc, &mut buf);
+
+	let mut display = Builder::new(ST7789, spi_interface)
+		.reset_pin(rst)
+		.init(&mut Delay::new_default())
+		.unwrap_or_else(|err| panic!("Failed to create display driver ({err:?})"));
+
+	display
+		.clear(Rgb565::BLACK)
+		.unwrap_or_else(|err| panic!("Failed to clear screen ({err:?})"));
+
+	Circle::with_center(Point::new(50, 50), 25)
+		.draw_styled(&PrimitiveStyle::with_fill(Rgb565::WHITE), &mut display)
+		.unwrap_or_else(|err| panic!("Failed to draw circle on screen ({err:?})"));
+
 	let uart_tx_pin = peripherals.pins.gpio1;
 	let uart_rx_pin = peripherals.pins.gpio3;
-	
+
 	let mut uart_config = Config::new();
 	uart_config.baudrate = Hertz(115200);
-	
+
 	let uart_driver = AsyncUartDriver::new(
 		peripherals.uart0,
 		uart_tx_pin,
@@ -387,42 +454,48 @@ async fn main(spawner: Spawner) {
 		None::<Gpio1>,
 		&uart_config
 	)
-		.unwrap_or_else(|err| panic!("Failed to create UART driver ({err})"));
-	
-	let wifi =
-		AsyncWifi::wrap(
-			EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs.clone()))
-				.unwrap_or_else(|err| panic!("Failed to create inner WiFi driver ({err})")),
-			sys_loop,
-			timer_service
-		)
-			.unwrap_or_else(|err| panic!("Failed to create WiFi driver ({err})"));
-	
+	.unwrap_or_else(|err| panic!("Failed to create UART driver ({err})"));
+
+	let wifi = AsyncWifi::wrap(
+		EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs.clone()))
+			.unwrap_or_else(|err| panic!("Failed to create inner WiFi driver ({err})")),
+		sys_loop,
+		timer_service
+	)
+	.unwrap_or_else(|err| panic!("Failed to create WiFi driver ({err})"));
+
 	let wifi_nvs_partition = EspNvs::new(nvs, "wifi", true).expect("Failed to get NVS namespace");
-	
+
 	let wifi_is_connected = Rc::new(Cell::new(false));
-	
+
 	spawner.spawn(
-		run_wifi(wifi, uart_driver, wifi_nvs_partition, wifi_is_connected.clone())
-			.unwrap_or_else(|err| panic!("Failed to obtain WiFi task token ({err})"))
+		run_wifi(
+			wifi,
+			uart_driver,
+			wifi_nvs_partition,
+			wifi_is_connected.clone()
+		)
+		.unwrap_or_else(|err| panic!("Failed to obtain WiFi task token ({err})"))
 	);
-	
+
 	let http_config = HTTPConfiguration {
 		crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
 		..Default::default()
 	};
-	
+
 	let mut http_client =
 		Client::wrap(EspHttpConnection::new(&http_config).expect("Failed to create HTTP client"));
-	
+
 	debug!("Created HTTP client");
-	
+
 	info!("Completed setup");
-	
+
 	loop {
 		Timer::after_secs(1).await;
-		if !wifi_is_connected.get() { continue; }
-		
+		if !wifi_is_connected.get() {
+			continue;
+		}
+
 		let headers = [(CLIENT_VERSION_HN, get_core_version())];
 		let request =
 			match http_client.request(Method::Get, "https://api.easy.drewbryan.org/ping", &headers)
@@ -433,7 +506,7 @@ async fn main(spawner: Spawner) {
 					continue;
 				}
 			};
-		
+
 		let response = match request.submit() {
 			Ok(response) => response,
 			Err(err) => {
@@ -441,7 +514,7 @@ async fn main(spawner: Spawner) {
 				continue;
 			}
 		};
-		
+
 		info!("Status: {}", response.status());
 	}
 }
