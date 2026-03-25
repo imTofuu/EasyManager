@@ -1,11 +1,16 @@
+#![feature(read_array)]
+#![feature(int_roundings)]
+#![feature(iter_array_chunks)]
+
+pub mod lcd;
+pub mod wifi;
+
 use std::cell::Cell;
-use std::ffi::{CStr, CString, c_int, c_uchar};
+use std::ffi::CString;
 use std::panic;
 use std::panic::PanicHookInfo;
 use std::rc::Rc;
-use std::str::FromStr;
 
-use anyhow::Context;
 use easy_manager_core::get_core_version;
 use easy_manager_core::packets::CLIENT_VERSION_HN;
 use embassy_executor::Spawner;
@@ -14,9 +19,9 @@ use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::geometry::Point;
 use embedded_graphics::pixelcolor::{Rgb565, RgbColor};
 use embedded_graphics::primitives::{Circle, PrimitiveStyle, StyledDrawable};
+use embedded_sdmmc::{Mode, SdCard, VolumeIdx, VolumeManager};
 use embedded_svc::http::Method;
 use embedded_svc::http::client::Client;
-use esp_idf_hal::gpio::{Gpio19, OutputPin, Pin, PinId};
 use esp_idf_hal::spi::config::Duplex;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::delay::Delay;
@@ -30,41 +35,23 @@ use esp_idf_svc::hal::uart::{AsyncUartDriver, UartDriver};
 use esp_idf_svc::hal::units::Hertz;
 use esp_idf_svc::http::client::{Configuration as HTTPConfiguration, EspHttpConnection};
 use esp_idf_svc::io::asynch::{Read, Write};
-use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
-use esp_idf_svc::sys::{
-	esp_eap_client_set_identity,
-	esp_eap_client_set_password,
-	esp_eap_client_set_username,
-	esp_wifi_sta_enterprise_disable,
-	esp_wifi_sta_enterprise_enable
-};
+use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
 use esp_idf_svc::timer::EspTaskTimerService;
-use esp_idf_svc::wifi::{
-	AsyncWifi,
-	AuthMethod,
-	ClientConfiguration,
-	Configuration as WifiConfiguration,
-	EspWifi
-};
-use log::{debug, error, info, warn};
+use esp_idf_svc::wifi::{AsyncWifi, EspWifi};
+use log::{LevelFilter, debug, error, info};
 use mipidsi::Builder;
 use mipidsi::interface::SpiInterface;
 use mipidsi::models::ST7789;
 
-struct SPIPinDriver<'d, MODE> {
-	inner: PinDriver<'d, MODE>
-}
-
-impl<'d, MODE> Pin for SPIPinDriver<'d, MODE> {
-	fn pin(&self) -> PinId { self.inner.pin() }
-}
-
-impl<'d, MODE> OutputPin for SPIPinDriver<'d, MODE> {}
+use crate::lcd::{DummyTimesource, ReadableFile, chunked_draw_from_bitmap_reader};
 
 fn panic(panic_info: &PanicHookInfo) {
 	error!("Panicked:  {panic_info}");
 	loop {}
 }
+
+use crate::lcd::SPIPinDriver;
+use crate::wifi::run_wifi;
 
 async fn uart_read_line(
 	uart: &mut AsyncUartDriver<'static, UartDriver<'static>>,
@@ -95,292 +82,11 @@ async fn uart_read_line(
 	result.unwrap()
 }
 
-async fn create_new_wifi_config(
-	uart: &mut AsyncUartDriver<'static, UartDriver<'static>>,
-	nvs: &mut EspNvs<NvsDefault>
-) -> Result<ClientConfiguration, anyhow::Error> {
-	let mut wifi_config = ClientConfiguration::default();
-
-	loop {
-		uart.write_all(c"\nEnter auth method: ".to_bytes()).await?;
-
-		match uart_read_line(uart, true).await.as_bytes() {
-			b"WPA" => wifi_config.auth_method = AuthMethod::WPA2Personal,
-			b"EAP" => wifi_config.auth_method = AuthMethod::WPA2Enterprise,
-			_ => {
-				error!("Unknown auth method");
-				continue;
-			}
-		}
-		break;
-	}
-
-	loop {
-		uart.write_all(c"\nEnter SSID: ".to_bytes()).await?;
-
-		match uart_read_line(uart, true).await.to_str() {
-			Ok(ok) => {
-				match ok.try_into() {
-					Ok(ok) => {
-						wifi_config.ssid = ok;
-						break;
-					}
-					Err(_) => error!("SSID is too long")
-				}
-			}
-			Err(_) => error!("SSID contains invalid characters")
-		}
-	}
-
-	if let AuthMethod::WPA2Enterprise = wifi_config.auth_method {
-		uart.write_all(c"\nEnter identity: ".to_bytes()).await?;
-		let identity = uart_read_line(uart, true).await;
-
-		uart.write_all(c"\nEnter username: ".to_bytes()).await?;
-		let username = uart_read_line(uart, true).await;
-
-		nvs.set_str(
-			"identity",
-			identity
-				.to_str()
-				.context("Converting identity to rust str")?
-		)?;
-		nvs.set_str(
-			"username",
-			username
-				.to_str()
-				.context("Converting username to rust str")?
-		)?;
-	}
-
-	loop {
-		uart.write_all(c"\nEnter password: ".to_bytes()).await?;
-
-		match uart_read_line(uart, false).await.to_str() {
-			Ok(input) => {
-				match input.try_into() {
-					Ok(s32_password) => {
-						wifi_config.password = s32_password;
-						break;
-					}
-					Err(_) => error!("Password is too long")
-				}
-			}
-			Err(_) => error!("Password contains invalid characters")
-		}
-	}
-
-	Ok(wifi_config)
-}
-
-async fn get_current_wifi_config(
-	wifi: &AsyncWifi<EspWifi<'static>>
-) -> Option<ClientConfiguration> {
-	match wifi.get_configuration() {
-		Ok(config) => {
-			match config {
-				WifiConfiguration::Client(config) => Some(config),
-				_ => None
-			}
-		}
-		Err(err) => {
-			error!("Failed to get previous WiFi config ({err})");
-			None
-		}
-	}
-}
-
-// Ownership of WiFi is shared with the main thread. If main panics then this
-// task will end, so the mutex will never be poisoned in this task, and
-// therefore unwraps are safe to use on them.
-#[allow(clippy::unwrap_used)]
-#[embassy_executor::task]
-async fn run_wifi(
-	mut wifi: AsyncWifi<EspWifi<'static>>,
-	mut uart: AsyncUartDriver<'static, UartDriver<'static>>,
-	mut nvs: EspNvs<NvsDefault>,
-	is_connected: Rc<Cell<bool>>
-) -> ! {
-	// Setup WiFi until success
-
-	loop {
-		match get_current_wifi_config(&wifi).await {
-			Some(_) => debug!("Previous WiFi config found"),
-			None => {
-				warn!("Previous WiFi config is missing or invalid");
-				match create_new_wifi_config(&mut uart, &mut nvs).await {
-					Ok(config) => {
-						if let Err(err) = wifi.set_configuration(&WifiConfiguration::Client(config))
-						{
-							error!("Failed to apply config to WiFi driver ({err})");
-						}
-					}
-					Err(err) => {
-						error!("Failed to set new WiFi config ({err}); retrying");
-						continue;
-					}
-				};
-			}
-		}
-
-		if let Err(err) = wifi.start().await {
-			error!("Failed to start WiFi driver ({err}); retrying setup");
-			continue;
-		}
-
-		break;
-	}
-
-	info!("WiFi started");
-
-	loop {
-		is_connected.set(false);
-		// Get existing config or create a new one
-		let current_config = match get_current_wifi_config(&wifi).await {
-			Some(config) => {
-				debug!("Previous WiFi config found");
-				config
-			}
-			None => {
-				warn!("Previous WiFi config is missing or invalid");
-				match create_new_wifi_config(&mut uart, &mut nvs).await {
-					Ok(config) => {
-						if let Err(err) = wifi.set_configuration(&WifiConfiguration::Client(config))
-						{
-							error!("Failed to apply config to WiFi driver ({err})");
-						}
-						continue;
-					}
-					Err(err) => {
-						error!("Failed to set new WiFi config ({err}); retrying");
-						if let Err(err) = wifi.set_configuration(&WifiConfiguration::None) {
-							error!("Failed to reset WiFi config ({err})");
-						}
-						continue;
-					}
-				}
-			}
-		};
-
-		match current_config.auth_method {
-			AuthMethod::WPA2Personal => unsafe {
-				esp_wifi_sta_enterprise_disable();
-			},
-			AuthMethod::WPA2Enterprise => unsafe {
-				let mut identity = [0u8; 253];
-				if let Err(err) = nvs.get_str("identity", &mut identity) {
-					error!("Failed to get identity from NVS ({err})");
-					if let Err(err) = wifi.set_configuration(&WifiConfiguration::None) {
-						error!("Failed to reset WiFi config ({err})");
-					}
-					continue;
-				}
-
-				let c_identity = match CStr::from_bytes_until_nul(&identity) {
-					Ok(result) => result,
-					Err(err) => {
-						error!("Failed to parse identity as c-string ({err})");
-						if let Err(err) = wifi.set_configuration(&WifiConfiguration::None) {
-							error!("Failed to reset WiFi config ({err})");
-						}
-						continue;
-					}
-				};
-
-				esp_eap_client_set_identity(
-					c_identity.as_ptr() as *const c_uchar,
-					c_identity.count_bytes() as c_int
-				);
-
-				let mut username = [0u8; 253];
-				if let Err(err) = nvs.get_str("username", &mut username) {
-					error!("Failed to get username from NVS ({err})");
-					if let Err(err) = wifi.set_configuration(&WifiConfiguration::None) {
-						error!("Failed to reset WiFi config ({err})");
-					}
-					continue;
-				}
-
-				let c_username = match CStr::from_bytes_until_nul(&username) {
-					Ok(result) => result,
-					Err(err) => {
-						error!("Failed to parse username as c-string ({err})");
-						if let Err(err) = wifi.set_configuration(&WifiConfiguration::None) {
-							error!("Failed to reset WiFi config ({err})");
-						}
-						continue;
-					}
-				};
-
-				esp_eap_client_set_username(
-					c_username.as_ptr() as *const c_uchar,
-					c_username.count_bytes() as c_int
-				);
-
-				let c_password = match CString::from_str(current_config.password.as_str()) {
-					Ok(result) => result,
-					Err(err) => {
-						error!("Failed to parse password as c-string ({err})");
-						if let Err(err) = wifi.set_configuration(&WifiConfiguration::None) {
-							error!("Failed to reset WiFi config ({err})");
-						}
-						continue;
-					}
-				};
-
-				esp_eap_client_set_password(
-					c_password.as_ptr() as *const c_uchar,
-					c_password.count_bytes() as c_int
-				);
-
-				esp_wifi_sta_enterprise_enable();
-			},
-			_ => {
-				error!("Invalid auth method");
-				if let Err(err) = wifi.set_configuration(&WifiConfiguration::None) {
-					error!("Failed to reset WiFi config ({err})");
-				}
-				continue;
-			}
-		}
-
-		match wifi.connect().await {
-			Ok(()) => {
-				info!("WiFi connection succeeded");
-
-				if let Err(err) = wifi.wait_netif_up().await {
-					error!("Failed to wait for WiFi interface to go up ({err}); reconnecting");
-					continue;
-				}
-
-				is_connected.set(true);
-
-				debug!(
-					"Connection information: {:?}",
-					wifi.wifi().sta_netif().get_ip_info()
-				);
-
-				if let Err(err) = wifi.wifi_wait(|wifi| wifi.is_connected(), None).await {
-					error!("Failed to wait for disconnection ({err}); reconnecting");
-					continue;
-				}
-			}
-			Err(err) => {
-				error!("Failed WiFi connection: ({err}); resetting configuration");
-				if let Err(err) = wifi.set_configuration(&WifiConfiguration::None) {
-					error!("Failed to reset WiFi config ({err})");
-				}
-				continue;
-			}
-		};
-	}
-}
-
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
 	esp_idf_svc::sys::link_patches();
 
-	esp_idf_svc::log::init_from_esp_idf();
+	esp_idf_svc::log::init(LevelFilter::Debug);
 
 	panic::set_hook(Box::new(panic));
 
@@ -395,46 +101,89 @@ async fn main(spawner: Spawner) {
 	let timer_service = EspTaskTimerService::new()
 		.unwrap_or_else(|err| panic!("Failed to create task timer service ({err})"));
 
-	debug!("Gotten ESP services");
-
 	let spi = SpiDriver::new(
 		peripherals.spi2,
 		peripherals.pins.gpio18,
 		peripherals.pins.gpio23,
-		None::<Gpio19>,
+		Some(peripherals.pins.gpio19),
 		&DriverConfig::default()
 	)
 	.unwrap_or_else(|err| panic!("Failed to create SPI driver ({err})"));
 
-	let cs = SPIPinDriver {
-		inner: PinDriver::output(peripherals.pins.gpio5)
+	debug!("Gotten ESP services");
+
+	let lcd_chip_select = SPIPinDriver::new(
+		PinDriver::output(peripherals.pins.gpio5)
 			.unwrap_or_else(|err| panic!("Failed to create pin CS pin driver for LCD ({err})"))
-	};
-	let dc = PinDriver::output(peripherals.pins.gpio21)
+	);
+	let sd_card_chip_select = SPIPinDriver::new(
+		PinDriver::output(peripherals.pins.gpio17)
+			.unwrap_or_else(|err| panic!("Failed to create CS pin driver for SD card ({err})"))
+	);
+	let lcd_dc = PinDriver::output(peripherals.pins.gpio21)
 		.unwrap_or_else(|err| panic!("Failed to create pin DC pin driver for LCD ({err})"));
-	let rst = PinDriver::output(peripherals.pins.gpio22)
+	let lcd_rst = PinDriver::output(peripherals.pins.gpio22)
 		.unwrap_or_else(|err| panic!("Failed to create pin RST pin driver for LCD ({err})"));
 
 	let lcd_device_driver = SpiDeviceDriver::new(
-		spi,
-		Some(cs),
+		&spi,
+		Some(lcd_chip_select),
 		&spi::config::Config::default()
 			.baudrate(Hertz(80_000_000))
 			.duplex(Duplex::Half)
 	)
 	.unwrap_or_else(|err| panic!("Failed to create LCD SPI driver ({err})"));
 
-	let mut buf = [0u8; 2048];
-	let spi_interface = SpiInterface::new(lcd_device_driver, dc, &mut buf);
+	let sd_card_device_driver = SpiDeviceDriver::new(
+		&spi,
+		Some(sd_card_chip_select),
+		&spi::config::Config::default()
+			.baudrate(Hertz(8_000_000))
+			.duplex(Duplex::Full)
+	)
+	.unwrap_or_else(|err| panic!("Failed to create SD card SPI driver ({err})"));
+
+	let mut lcd_spi_buf = [0u8; 2048];
+	let spi_interface = SpiInterface::new(lcd_device_driver, lcd_dc, &mut lcd_spi_buf);
 
 	let mut display = Builder::new(ST7789, spi_interface)
-		.reset_pin(rst)
+		.reset_pin(lcd_rst)
 		.init(&mut Delay::new_default())
 		.unwrap_or_else(|err| panic!("Failed to create display driver ({err:?})"));
 
+	debug!("Created display");
+
+	let sd_card = SdCard::new(sd_card_device_driver, Delay::new_default());
+
+	debug!("Created SD card");
+	debug!(
+		"SD card size: {}",
+		sd_card
+			.num_bytes()
+			.unwrap_or_else(|err| panic!("Failed to get number of bytes in SD card ({err:?})"))
+	);
+
+	let volume_manager = VolumeManager::new(sd_card, DummyTimesource {});
+	let volume = volume_manager
+		.open_volume(VolumeIdx(0))
+		.unwrap_or_else(|err| panic!("Failed to open volume on SD card ({err:?})"));
+
+	let root_dir = volume
+		.open_root_dir()
+		.unwrap_or_else(|err| panic!("Failed to open root directory on SD card ({err:?})"));
+
+	let onion_photo = ReadableFile::new(
+		root_dir
+			.open_file_in_dir("ONIONSML.BMP", Mode::ReadOnly)
+			.unwrap_or_else(|err| panic!("Failed to open onion photo :( ({err:?})"))
+	);
+
 	display
-		.clear(Rgb565::BLACK)
+		.clear(Rgb565::GREEN)
 		.unwrap_or_else(|err| panic!("Failed to clear screen ({err:?})"));
+	
+	chunked_draw_from_bitmap_reader(&mut display, onion_photo, 5)
+		.unwrap_or_else(|err| panic!("Failed to draw image ({err})"));
 
 	Circle::with_center(Point::new(50, 50), 25)
 		.draw_styled(&PrimitiveStyle::with_fill(Rgb565::WHITE), &mut display)
