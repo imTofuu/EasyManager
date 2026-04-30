@@ -1,7 +1,7 @@
 [build]
 target = "xtensa-esp32-espidf"
 
-[target.'cfg(target_os = "espidf")']
+[target.xtensa-esp32-espidf]
 linker = "ldproxy"
 runner = "espflash flash --monitor"
 rustflags = [ "--cfg",  "espidf_time64"]
@@ -13,7 +13,10 @@ build-std = ["std", "panic_abort"]
 MCU = "esp32"
 ESP_IDF_VERSION = "v5.5.3"
 ESP_IDF_TOOLS_INSTALL_DIR = "workspace"
-
+DEP_LV_CONFIG_PATH = { relative = true, value = "lvgl-configs" }
+CROSS_COMPILE = "xtensa-esp32-elf"
+CFLAGS_xtensa_esp32_espidf = "-mlongcalls"
+BINDGEN_EXTRA_CLANG_ARGS = "-I/Users/drewbryan/Documents/Projects/EasyManager/easy_manager_physical_interface/.embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20251107/xtensa-esp-elf/xtensa-esp-elf/include"
 # Uncomment this if you have moved the target dir by setting CARGO_TARGET_DIR or similar.
 # Required for now due to embuild limitations.
 #CARGO_WORKSPACE_DIR = { value = "", relative = true }

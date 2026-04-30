@@ -8,13 +8,13 @@
       <sourceFolder url="file://$MODULE_DIR$/api/easy_manager_server/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/api/easy_manager_session_generator/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/api/easy_manager_server/migration/src" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/api/easy_manager_physical_interface/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/easy_manager_physical_interface/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/api/target" />
       <excludeFolder url="file://$MODULE_DIR$/api/easy_manager_client/target" />
       <excludeFolder url="file://$MODULE_DIR$/api/easy_manager_core/target" />
       <excludeFolder url="file://$MODULE_DIR$/api/easy_manager_server/target" />
       <excludeFolder url="file://$MODULE_DIR$/api/easy_manager_session_generator/target" />
-      <excludeFolder url="file://$MODULE_DIR$/api/easy_manager_physical_interface/target" />
+      <excludeFolder url="file://$MODULE_DIR$/easy_manager_physical_interface/target" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />

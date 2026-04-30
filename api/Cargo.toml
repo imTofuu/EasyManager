@@ -3,5 +3,5 @@ members = [
     "easy_manager_core",
     "easy_manager_server",
 ]
-exclude = ["easy_manager_physical_interface"]
+exclude = ["../easy_manager_physical_interface"]
 resolver = "3"
