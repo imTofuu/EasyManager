@@ -12,6 +12,7 @@ use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::primitives::Rectangle;
 use embedded_sdmmc::{BlockDevice, File, TimeSource, Timestamp};
 use esp_idf_hal::gpio::{OutputPin, Pin, PinDriver, PinId};
+use esp_idf_hal::pcnt::PcntUnitDriver;
 use esp_idf_hal::spi::SpiDriver;
 use esp_idf_sys::{
 	esp,
@@ -30,8 +31,10 @@ use esp_idf_sys::{
 	esp_lcd_spi_bus_handle_t,
 	lcd_rgb_data_endian_t_LCD_RGB_DATA_ENDIAN_LITTLE
 };
-use log::error;
+use log::{error, info};
 use lvgl::Align::Center;
+use lvgl::input_device::InputDriver;
+use lvgl::input_device::encoder::{Encoder, EncoderInputData};
 use lvgl::style::Style;
 use lvgl::widgets::Label;
 use lvgl::{Color, Display, DrawBuffer, Part, Widget};
@@ -172,14 +175,39 @@ pub fn setup_lcd(spi: &SpiDriver, cs: c_int, dc: c_int, rst: c_int) -> anyhow::R
 }
 
 #[embassy_executor::task]
-pub async fn run_lcd() -> ! {
+pub async fn run_lcd(display: Display, pulse_counter: PcntUnitDriver<'static>) -> ! {
+	let mut last_input_state = EncoderInputData::Press.released().once();
+	let _input = Encoder::register(|| last_input_state, &display);
+
 	let mut last = Instant::now();
 	loop {
-		let now = Instant::now();
+		Timer::after_millis(50).await;
+
 		lvgl::task_handler();
+
+		let now = Instant::now();
 		lvgl::tick_inc(now - last);
 		last = now;
-		Timer::after_millis(50).await;
+
+		match pulse_counter.get_count() {
+			Ok(count) => {
+				if count > 0 {
+					info!("cw");
+					last_input_state = EncoderInputData::TurnRight.released().once();
+				} else if count < 0 {
+					info!("ccw");
+					last_input_state = EncoderInputData::TurnLeft.released().once();
+				}
+			}
+			Err(err) => {
+				error!("Failed to get encoder pulse count ({err})");
+				continue;
+			}
+		};
+		if let Err(err) = pulse_counter.clear_count() {
+			error!("Failed to clear encoder pulse count ({err})");
+			continue;
+		}
 	}
 }
 

@@ -1,8 +1,10 @@
 #![feature(read_array)]
 #![feature(int_roundings)]
 #![feature(iter_array_chunks)]
+#![feature(fn_traits)]
 
 pub mod lcd;
+pub mod rfid;
 pub mod wifi;
 
 use std::cell::Cell;
@@ -17,6 +19,8 @@ use embassy_executor::Spawner;
 use embassy_time::Timer;
 use embedded_svc::http::Method;
 use embedded_svc::http::client::Client;
+use esp_idf_hal::pcnt::PcntUnitDriver;
+use esp_idf_hal::pcnt::config::{ChannelConfig, ChannelEdgeAction, ChannelLevelAction, UnitConfig};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::gpio::{Gpio0, Gpio1};
 use esp_idf_svc::hal::peripherals::Peripherals;
@@ -33,6 +37,7 @@ use esp_idf_svc::wifi::{AsyncWifi, EspWifi};
 use log::{LevelFilter, debug, error, info};
 
 use crate::lcd::{run_lcd, setup_lcd};
+use crate::rfid::RfidReader;
 use crate::wifi::run_wifi;
 
 fn panic(panic_info: &PanicHookInfo) {
@@ -88,8 +93,17 @@ async fn main(spawner: Spawner) {
 	let timer_service = EspTaskTimerService::new()
 		.unwrap_or_else(|err| panic!("Failed to create task timer service ({err})"));
 
-	let spi = SpiDriver::new(
+	let spi2 = SpiDriver::new(
 		peripherals.spi2,
+		peripherals.pins.gpio14,
+		peripherals.pins.gpio13,
+		Some(peripherals.pins.gpio12),
+		&DriverConfig::default()
+	)
+	.unwrap_or_else(|err| panic!("Failed to create SPI driver ({err})"));
+
+	let spi3 = SpiDriver::new(
+		peripherals.spi3,
 		peripherals.pins.gpio18,
 		peripherals.pins.gpio23,
 		Some(peripherals.pins.gpio19),
@@ -100,14 +114,44 @@ async fn main(spawner: Spawner) {
 	debug!("Gotten ESP services");
 
 	// Drop these so they aren't accidentally used after giving them to the lcd
-	peripherals.pins.gpio5;
-	peripherals.pins.gpio21;
-	peripherals.pins.gpio22;
+	peripherals.pins.gpio15;
+	peripherals.pins.gpio26;
+	peripherals.pins.gpio27;
 
-	let _display =
-		setup_lcd(&spi, 5, 21, 22).unwrap_or_else(|err| panic!("Failed to setup LCD ({err})"));
+	let display =
+		setup_lcd(&spi2, 15, 26, 27).unwrap_or_else(|err| panic!("Failed to setup LCD ({err})"));
 
 	debug!("Created display");
+
+	let pcnt_config = UnitConfig {
+		low_limit: i16::MIN as i32,
+		high_limit: i16::MAX as i32,
+		intr_priority: 0,
+		accum_count: false,
+		..Default::default()
+	};
+	let mut pulse_counter_driver = PcntUnitDriver::new(&pcnt_config)
+		.unwrap_or_else(|err| panic!("Failed to create pulse counter driver ({err})"));
+	pulse_counter_driver
+		.add_channel(
+			Some(peripherals.pins.gpio32),
+			Some(peripherals.pins.gpio33),
+			&ChannelConfig::default()
+		)
+		.unwrap_or_else(|err| panic!("Failed to add channel to pulse counter ({err})"))
+		.set_edge_action(ChannelEdgeAction::Decrease, ChannelEdgeAction::Increase)
+		.unwrap_or_else(|err| panic!("Failed to set edge action of pulse counter channel ({err})"))
+		.set_level_action(ChannelLevelAction::Keep, ChannelLevelAction::Inverse)
+		.unwrap_or_else(|err| {
+			panic!("Failed to set level action of pulse counter channel ({err})")
+		});
+
+	pulse_counter_driver
+		.enable()
+		.unwrap_or_else(|err| panic!("Failed to enable pulse counter ({err})"));
+	pulse_counter_driver
+		.start()
+		.unwrap_or_else(|err| panic!("Failed to start pulse counter ({err})"));
 
 	let uart_tx_pin = peripherals.pins.gpio1;
 	let uart_rx_pin = peripherals.pins.gpio3;
@@ -134,11 +178,12 @@ async fn main(spawner: Spawner) {
 	.unwrap_or_else(|err| panic!("Failed to create WiFi driver ({err})"));
 
 	let wifi_nvs_partition = EspNvs::new(nvs, "wifi", true).expect("Failed to get NVS namespace");
-
 	let wifi_is_connected = Rc::new(Cell::new(false));
 
-	spawner
-		.spawn(run_lcd().unwrap_or_else(|err| panic!("Failed to obtain LCD task token ({err})")));
+	spawner.spawn(
+		run_lcd(display, pulse_counter_driver)
+			.unwrap_or_else(|err| panic!("Failed to obtain LCD task token ({err})"))
+	);
 
 	spawner.spawn(
 		run_wifi(
@@ -162,10 +207,30 @@ async fn main(spawner: Spawner) {
 
 	info!("Completed setup");
 
+	let mut rfid_device = RfidReader::new(&spi3, Some(peripherals.pins.gpio5), |uid, _| {
+		info!("uid: {:?}", uid.as_bytes());
+		[0xff; 6]
+	})
+	.unwrap_or_else(|err| panic!("Failed to create RFID device ({err})"));
+
 	loop {
 		Timer::after_millis(50).await;
 
-		if !wifi_is_connected.get() {
+		match rfid_device.reqa_collect_data(1..2) {
+			Ok(Some(data)) => {
+				info!("rfid data: {data:?}")
+			}
+			Err(err) => {
+				error!("Failed to read RFID tag: ({err})");
+			}
+			_ => {}
+		}
+
+		if let Err(err) = rfid_device.reqa_write_data([(1u8, *b"hello\0\0\0\0\0\0\0\0\0\0\0")]) {
+			error!("Failed to write RFID tag ({err})");
+		}
+
+		/*if !wifi_is_connected.get() {
 			continue;
 		}
 
@@ -188,6 +253,6 @@ async fn main(spawner: Spawner) {
 			}
 		};
 
-		info!("Status: {}", response.status());
+		info!("Status: {}", response.status());*/
 	}
 }
