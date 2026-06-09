@@ -6,10 +6,9 @@ use esp_idf_hal::gpio::OutputPin;
 use esp_idf_hal::spi::{SpiDeviceDriver, SpiDriver, SpiError};
 use esp_idf_hal::units::Hertz;
 use mfrc522::comm::blocking::spi::{DummyDelay, SpiInterface};
-use mfrc522::{Error, Initialized, Mfrc522, MifareKey, State, Uid};
+use mfrc522::{Error, Initialized, Mfrc522, MifareKey, Uid};
 
-type RfidInner<'d, SPI: Borrow<SpiDriver<'d>> + 'd, T: State> =
-	Mfrc522<SpiInterface<SpiDeviceDriver<'d, SPI>, DummyDelay>, T>;
+type RfidInner<'d, SPI, T> = Mfrc522<SpiInterface<SpiDeviceDriver<'d, SPI>, DummyDelay>, T>;
 
 pub struct RfidReader<'d, SPI: Borrow<SpiDriver<'d>> + 'd, K: Fn(&Uid, u8) -> MifareKey> {
 	inner:  RfidInner<'d, SPI, Initialized>,

@@ -39,11 +39,19 @@ embedded-hal = "1.0.0"
 embassy-executor = {  version = "0.10.0", features = ["platform-std", "executor-thread"] }
 embassy-time = { version = "0.5" }
 
+lvgl = { version = "0.6.2", default-features = false, features = ["embedded_graphics", "unsafe_no_autoinit", "nightly"] }
+
 anyhow = "1.0.102"
 log = "0.4.29"
-lvgl = { version = "0.6.2", default-features = false, features = ["embedded_graphics", "unsafe_no_autoinit", "nightly"] }
 cstr_core = "0.2.6"
 mfrc522 = { version = "0.8.0", features = ["std"] }
+static_cell = "2.1.1"
+rustyfarian-esp-idf-ws2812 = "0.6.0"
+rgb = "0.8.53"
+
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_lcd_st7796", version = "^1.4.0" }
+bindings_header = "src/bindings.h"
 
 [build-dependencies]
 embuild = "0.33"

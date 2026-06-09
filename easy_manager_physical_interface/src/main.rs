@@ -13,14 +13,10 @@ use std::panic::PanicHookInfo;
 use std::rc::Rc;
 
 use cstr_core::CString;
-use easy_manager_core::get_core_version;
-use easy_manager_core::packets::CLIENT_VERSION_HN;
 use embassy_executor::Spawner;
 use embassy_time::Timer;
-use embedded_svc::http::Method;
 use embedded_svc::http::client::Client;
-use esp_idf_hal::pcnt::PcntUnitDriver;
-use esp_idf_hal::pcnt::config::{ChannelConfig, ChannelEdgeAction, ChannelLevelAction, UnitConfig};
+use esp_idf_hal::rmt::config::{MemoryAccess, TxChannelConfig};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::gpio::{Gpio0, Gpio1};
 use esp_idf_svc::hal::peripherals::Peripherals;
@@ -35,8 +31,10 @@ use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
 use esp_idf_svc::timer::EspTaskTimerService;
 use esp_idf_svc::wifi::{AsyncWifi, EspWifi};
 use log::{LevelFilter, debug, error, info};
+use rgb::RGB8;
+use rustyfarian_esp_idf_ws2812::Ws2812Rmt;
 
-use crate::lcd::{run_lcd, setup_lcd};
+use crate::lcd::run_lcd;
 use crate::rfid::RfidReader;
 use crate::wifi::run_wifi;
 
@@ -76,7 +74,6 @@ async fn uart_read_line(
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-	lvgl::init();
 	esp_idf_svc::sys::link_patches();
 	esp_idf_svc::log::init(LevelFilter::Debug);
 
@@ -93,11 +90,22 @@ async fn main(spawner: Spawner) {
 	let timer_service = EspTaskTimerService::new()
 		.unwrap_or_else(|err| panic!("Failed to create task timer service ({err})"));
 
+	let mut led_channel_config = TxChannelConfig::default();
+	led_channel_config.resolution = Hertz(10_000_000);
+	led_channel_config.memory_access = MemoryAccess::Indirect {
+		memory_block_symbols: 64
+	};
+
+	let mut led_driver =
+		Ws2812Rmt::new_with_channel_config(peripherals.pins.gpio25, led_channel_config).unwrap();
+	led_driver.set_pixel(RGB8::new(127, 127, 127)).unwrap();
+	led_driver.set_pixel(RGB8::new(0, 127, 0)).unwrap();
+
 	let spi2 = SpiDriver::new(
 		peripherals.spi2,
 		peripherals.pins.gpio14,
 		peripherals.pins.gpio13,
-		Some(peripherals.pins.gpio12),
+		None::<Gpio0>,
 		&DriverConfig::default()
 	)
 	.unwrap_or_else(|err| panic!("Failed to create SPI driver ({err})"));
@@ -113,45 +121,7 @@ async fn main(spawner: Spawner) {
 
 	debug!("Gotten ESP services");
 
-	// Drop these so they aren't accidentally used after giving them to the lcd
-	peripherals.pins.gpio15;
-	peripherals.pins.gpio26;
-	peripherals.pins.gpio27;
-
-	let display =
-		setup_lcd(&spi2, 15, 26, 27).unwrap_or_else(|err| panic!("Failed to setup LCD ({err})"));
-
 	debug!("Created display");
-
-	let pcnt_config = UnitConfig {
-		low_limit: i16::MIN as i32,
-		high_limit: i16::MAX as i32,
-		intr_priority: 0,
-		accum_count: false,
-		..Default::default()
-	};
-	let mut pulse_counter_driver = PcntUnitDriver::new(&pcnt_config)
-		.unwrap_or_else(|err| panic!("Failed to create pulse counter driver ({err})"));
-	pulse_counter_driver
-		.add_channel(
-			Some(peripherals.pins.gpio32),
-			Some(peripherals.pins.gpio33),
-			&ChannelConfig::default()
-		)
-		.unwrap_or_else(|err| panic!("Failed to add channel to pulse counter ({err})"))
-		.set_edge_action(ChannelEdgeAction::Decrease, ChannelEdgeAction::Increase)
-		.unwrap_or_else(|err| panic!("Failed to set edge action of pulse counter channel ({err})"))
-		.set_level_action(ChannelLevelAction::Keep, ChannelLevelAction::Inverse)
-		.unwrap_or_else(|err| {
-			panic!("Failed to set level action of pulse counter channel ({err})")
-		});
-
-	pulse_counter_driver
-		.enable()
-		.unwrap_or_else(|err| panic!("Failed to enable pulse counter ({err})"));
-	pulse_counter_driver
-		.start()
-		.unwrap_or_else(|err| panic!("Failed to start pulse counter ({err})"));
 
 	let uart_tx_pin = peripherals.pins.gpio1;
 	let uart_rx_pin = peripherals.pins.gpio3;
@@ -181,8 +151,16 @@ async fn main(spawner: Spawner) {
 	let wifi_is_connected = Rc::new(Cell::new(false));
 
 	spawner.spawn(
-		run_lcd(display, pulse_counter_driver)
-			.unwrap_or_else(|err| panic!("Failed to obtain LCD task token ({err})"))
+		run_lcd(
+			spi2,
+			peripherals.pins.gpio15.degrade_output(),
+			peripherals.pins.gpio26.degrade_output(),
+			peripherals.pins.gpio27.degrade_output(),
+			peripherals.pins.gpio16.degrade_input(),
+			peripherals.pins.gpio17.degrade_input(),
+			peripherals.pins.gpio21.degrade_input()
+		)
+		.unwrap_or_else(|err| panic!("Failed to obtain LCD task token ({err})"))
 	);
 
 	spawner.spawn(
@@ -214,9 +192,9 @@ async fn main(spawner: Spawner) {
 	.unwrap_or_else(|err| panic!("Failed to create RFID device ({err})"));
 
 	loop {
-		Timer::after_millis(50).await;
+		Timer::after_millis(5).await;
 
-		match rfid_device.reqa_collect_data(1..2) {
+		match rfid_device.reqa_collect_data(3..5) {
 			Ok(Some(data)) => {
 				info!("rfid data: {data:?}")
 			}
