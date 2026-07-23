@@ -48,6 +48,7 @@ mfrc522 = { version = "0.8.0", features = ["std"] }
 static_cell = "2.1.1"
 rustyfarian-esp-idf-ws2812 = "0.6.0"
 rgb = "0.8.53"
+arrayvec = "0.7.8"
 
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "espressif/esp_lcd_st7796", version = "^1.4.0" }

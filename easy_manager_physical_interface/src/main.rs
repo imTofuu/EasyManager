@@ -2,8 +2,13 @@
 #![feature(int_roundings)]
 #![feature(iter_array_chunks)]
 #![feature(fn_traits)]
+#![feature(unsafe_cell_access)]
+#![feature(push_mut)]
+#![feature(ptr_as_ref_unchecked)]
 
+mod graphics;
 pub mod lcd;
+mod pages;
 pub mod rfid;
 pub mod wifi;
 

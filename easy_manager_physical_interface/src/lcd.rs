@@ -1,17 +1,12 @@
 use std::ffi::{c_int, c_void};
 use std::io::Read;
-use std::mem::transmute;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI16, Ordering};
 use std::time::Instant;
 
 use anyhow::Context;
-use cstr_core::CStr;
+use arrayvec::ArrayVec;
 use embassy_time::Timer;
-use embedded_graphics::draw_target::DrawTarget;
-use embedded_graphics::geometry::{Point, Size};
-use embedded_graphics::pixelcolor::Rgb565;
-use embedded_graphics::primitives::Rectangle;
 use embedded_sdmmc::{BlockDevice, File, TimeSource, Timestamp};
 use esp_idf_hal::gpio::{
 	AnyInputPin,
@@ -32,6 +27,7 @@ use esp_idf_sys::{
 	esp_lcd_new_panel_io_spi,
 	esp_lcd_new_panel_st7796,
 	esp_lcd_panel_dev_config_t,
+	esp_lcd_panel_dev_config_t__bindgen_ty_1,
 	esp_lcd_panel_disp_on_off,
 	esp_lcd_panel_draw_bitmap,
 	esp_lcd_panel_handle_t,
@@ -44,26 +40,29 @@ use esp_idf_sys::{
 	esp_lcd_panel_set_gap,
 	esp_lcd_spi_bus_handle_t,
 	gpio_num_t,
-	lcd_rgb_data_endian_t_LCD_RGB_DATA_ENDIAN_LITTLE
+	lcd_rgb_data_endian_t_LCD_RGB_DATA_ENDIAN_LITTLE,
+	lcd_rgb_element_order_t_LCD_RGB_ELEMENT_ORDER_BGR,
+	st7796_lcd_init_cmd_t,
+	st7796_vendor_config_t
 };
 use log::{debug, error, info};
-use lvgl::Align::Center;
-use lvgl::style::Style;
 use lvgl::sys::{
 	_lv_indev_drv_t,
-	lv_group_add_obj,
 	lv_group_create,
 	lv_group_set_default,
 	lv_indev_data_t,
 	lv_indev_drv_register,
+	lv_indev_drv_t,
 	lv_indev_set_group,
 	lv_indev_state_t,
 	lv_indev_state_t_LV_INDEV_STATE_PRESSED,
-	lv_indev_state_t_LV_INDEV_STATE_RELEASED
+	lv_indev_state_t_LV_INDEV_STATE_RELEASED,
+	lv_indev_t
 };
-use lvgl::widgets::{Btn, Label};
-use lvgl::{Color, Display, DrawBuffer, NativeObject, Part, Widget};
-use static_cell::StaticCell;
+use lvgl::{Display, DrawBuffer};
+
+use crate::graphics::{ModernTheme, Unipage};
+use crate::pages::main_page;
 
 pub struct SPIPinDriver<'d, MODE>(PinDriver<'d, MODE>);
 
@@ -123,8 +122,10 @@ pub enum ImageDrawError {
 	DrawError()
 }
 
-pub struct InteractableDisplay {
-	_display: Display,
+pub struct InteractableDisplay<'a> {
+	display:    Display,
+	page_stack: ArrayVec<Box<Unipage<'a>>, 64>,
+	indev:      *mut lv_indev_t,
 
 	enc_clk: PinDriver<'static, Input>,
 	enc_sw:  PinDriver<'static, Input>
@@ -140,7 +141,7 @@ static mut ENCODER_STATE: EncoderState = EncoderState {
 	pressed: lv_indev_state_t_LV_INDEV_STATE_RELEASED
 };
 
-impl InteractableDisplay {
+impl<'a> InteractableDisplay<'a> {
 	pub fn new(
 		spi: &SpiDriver,
 		cs: impl OutputPin,
@@ -150,24 +151,6 @@ impl InteractableDisplay {
 		enc_dt: impl InputPin + 'static,
 		enc_sw: impl InputPin + 'static
 	) -> anyhow::Result<Self> {
-		let panel_io_config = esp_lcd_panel_io_spi_config_t {
-			dc_gpio_num: dc.pin() as c_int,
-			cs_gpio_num: cs.pin() as c_int,
-			pclk_hz: 10 * 1000 * 1000,
-			lcd_cmd_bits: 8,
-			lcd_param_bits: 8,
-			spi_mode: 0,
-			trans_queue_depth: 1,
-			..Default::default()
-		};
-
-		let panel_dev_config = esp_lcd_panel_dev_config_t {
-			reset_gpio_num: rst.pin() as c_int,
-			data_endian: lcd_rgb_data_endian_t_LCD_RGB_DATA_ENDIAN_LITTLE,
-			bits_per_pixel: 16,
-			..Default::default()
-		};
-
 		let mut clk = PinDriver::input(enc_clk, Pull::Floating)
 			.unwrap_or_else(|err| panic!("Failed to make rotary encoder CLK pin driver ({err})"));
 		let dt = PinDriver::input(enc_dt, Pull::Floating)
@@ -212,6 +195,70 @@ impl InteractableDisplay {
 		sw.enable_interrupt()
 			.context("failed to enable rotary encoder Sw interrupt")?;
 
+		let panel_io_config = esp_lcd_panel_io_spi_config_t {
+			dc_gpio_num: dc.pin() as c_int,
+			cs_gpio_num: cs.pin() as c_int,
+			pclk_hz: 10 * 1000 * 1000,
+			lcd_cmd_bits: 8,
+			lcd_param_bits: 8,
+			spi_mode: 0,
+			trans_queue_depth: 1,
+			..Default::default()
+		};
+
+		static CSCON_UNLOCK_1: [u8; 1] = [0xc3];
+		static CSCON_UNLOCK_2: [u8; 1] = [0x96];
+		static PGAMCTRL: [u8; 14] = [
+			0xf0, 0x09, 0x13, 0x12, 0x12, 0x2b, 0x3c, 0x44, 0x4b, 0x1b, 0x18, 0x17, 0x1d, 0x21
+		];
+		static NGAMCTRL: [u8; 14] = [
+			0xf0, 0x09, 0x13, 0x0c, 0x0d, 0x27, 0x3b, 0x44, 0x4d, 0x0b, 0x17, 0x17, 0x1d, 0x21
+		];
+
+		let init_cmds: [st7796_lcd_init_cmd_t; 4] = [
+			st7796_lcd_init_cmd_t {
+				cmd:        0xf0,
+				data:       CSCON_UNLOCK_1.as_ptr() as *const c_void,
+				data_bytes: CSCON_UNLOCK_1.len(),
+				delay_ms:   0
+			},
+			st7796_lcd_init_cmd_t {
+				cmd:        0xf0,
+				data:       CSCON_UNLOCK_2.as_ptr() as *const c_void,
+				data_bytes: CSCON_UNLOCK_2.len(),
+				delay_ms:   0
+			},
+			st7796_lcd_init_cmd_t {
+				cmd:        0xe0,
+				data:       PGAMCTRL.as_ptr() as *const c_void,
+				data_bytes: PGAMCTRL.len(),
+				delay_ms:   0
+			},
+			st7796_lcd_init_cmd_t {
+				cmd:        0xe1,
+				data:       NGAMCTRL.as_ptr() as *const c_void,
+				data_bytes: NGAMCTRL.len(),
+				delay_ms:   0
+			}
+		];
+
+		let mut vendor_config = st7796_vendor_config_t {
+			init_cmds: init_cmds.as_ptr(),
+			init_cmds_size: init_cmds.len() as u16,
+			..Default::default()
+		};
+
+		let panel_dev_config = esp_lcd_panel_dev_config_t {
+			reset_gpio_num: rst.pin() as c_int,
+			data_endian: lcd_rgb_data_endian_t_LCD_RGB_DATA_ENDIAN_LITTLE,
+			bits_per_pixel: 16,
+			vendor_config: &mut vendor_config as *mut st7796_vendor_config_t as *mut c_void,
+			__bindgen_anon_1: esp_lcd_panel_dev_config_t__bindgen_ty_1 {
+				rgb_ele_order: lcd_rgb_element_order_t_LCD_RGB_ELEMENT_ORDER_BGR
+			},
+			..Default::default()
+		};
+
 		let mut io_handle = esp_lcd_panel_io_handle_t::default();
 		let mut panel_handle = esp_lcd_panel_handle_t::default();
 
@@ -231,8 +278,8 @@ impl InteractableDisplay {
 			esp_lcd_panel_reset(panel_handle);
 			esp_lcd_panel_init(panel_handle);
 			esp_lcd_panel_set_gap(panel_handle, 0, 0);
-			esp_lcd_panel_invert_color(panel_handle, true);
-			esp_lcd_panel_mirror(panel_handle, true, false);
+			esp_lcd_panel_invert_color(panel_handle, false);
+			esp_lcd_panel_mirror(panel_handle, false, true);
 			esp_lcd_panel_disp_on_off(panel_handle, true);
 		}
 
@@ -254,30 +301,6 @@ impl InteractableDisplay {
 		})
 		.context("failed to create LVGL _display")?;
 
-		let mut screen = lvgl_display.get_scr_act()?;
-		static SCREEN_STYLE: StaticCell<Style> = StaticCell::new();
-		let screen_style = SCREEN_STYLE.init(Style::default());
-		screen_style.set_bg_color(Color::from_rgb((255, 255, 255)));
-		screen.add_style(Part::Main, screen_style);
-
-		let mut button1 = Btn::create(&mut screen)?;
-		button1.set_pos(100, 100);
-
-		let mut label = Label::create(&mut button1)?;
-		label.set_text(CStr::from_bytes_with_nul(b"hello\0").unwrap());
-		//label.set_height(50);
-		//label.set_width(50);
-		label.set_align(Center, 0, 0);
-
-		let mut button2 = Btn::create(&mut screen)?;
-		button2.set_pos(200, 200);
-
-		let mut label2 = Label::create(&mut button2)?;
-		label2.set_text(CStr::from_bytes_with_nul(b"hello\0").unwrap());
-		//label2.set_height(50);
-		//label2.set_width(50);
-		label2.set_align(Center, 0, 0);
-
 		let encoder = Box::leak(Box::new(_lv_indev_drv_t::default()));
 		unsafe { lvgl::sys::lv_indev_drv_init(encoder) };
 		encoder.type_ = lvgl::sys::lv_indev_type_t_LV_INDEV_TYPE_ENCODER;
@@ -288,16 +311,54 @@ impl InteractableDisplay {
 		unsafe { lv_indev_set_group(encoder_ptr, group) };
 
 		unsafe {
-			lv_group_add_obj(group, button1.raw().as_ptr());
-			lv_group_add_obj(group, button2.raw().as_ptr());
+			//lv_group_add_obj(group, button1.raw().as_ptr());
+			//lv_group_add_obj(group, button2.raw().as_ptr());
 			lv_group_set_default(group);
 		}
 
 		Ok(Self {
-			_display: lvgl_display,
-			enc_clk:  clk,
-			enc_sw:   sw
+			display:    lvgl_display,
+			page_stack: ArrayVec::new(),
+			indev:      encoder_ptr,
+			enc_clk:    clk,
+			enc_sw:     sw
 		})
+	}
+
+	pub fn push_page(&mut self, page: Unipage<'a>) {
+		// todo fix this panic
+		self.page_stack.push(Box::new(page));
+
+		// As long as the top page isn't popped without moving the active screen down
+		// first i think this should be fine
+		let new_top_screen = unsafe {
+			self.page_stack
+				.as_mut_ptr()
+				.add(self.page_stack.len() - 1)
+				.as_mut()
+				.expect("Page stack pointer is null")
+		};
+
+		new_top_screen.make_group_active(self.indev);
+		self.display.set_scr_act(new_top_screen.screen());
+	}
+
+	pub fn pop_page(&mut self) -> Option<Unipage<'a>> {
+		assert_ne!(self.page_stack.len(), 1, "Attempting to pop main screen");
+
+		let new_top_screen = unsafe {
+			self.page_stack
+				.as_mut_ptr()
+				.add(self.page_stack.len() - 2)
+				.as_mut()
+				.expect("Page stack pointer is null")
+		};
+
+		new_top_screen.make_group_active(self.indev);
+		self.display.set_scr_act(new_top_screen.screen());
+
+		let old_top_screen = self.page_stack.pop();
+		old_top_screen.map(|page| *page)
 	}
 }
 
@@ -314,8 +375,15 @@ pub async fn run_lcd(
 	info!("Running LCD");
 	lvgl::init();
 
+	let theme = Box::leak(Box::new(ModernTheme::new()));
+
 	let mut display = InteractableDisplay::new(&spi, cs, dc, rst, enc_clk, enc_dt, enc_sw)
 		.unwrap_or_else(|err| panic!("Failed to create LCD ({err})"));
+
+	// Create main page
+	let page = Unipage::try_new(theme, &mut display, main_page).unwrap();
+
+	display.push_page(page);
 
 	debug!("Starting LCD loop");
 	let mut last = Instant::now();
@@ -341,7 +409,7 @@ unsafe extern "C" fn encoder_read(_drv: *mut _lv_indev_drv_t, data: *mut lv_inde
 	data.state = ENCODER_STATE.pressed;
 }
 
-pub fn chunked_draw_from_bitmap_reader<D: DrawTarget<Color = Rgb565>>(
+/*pub fn chunked_draw_from_bitmap_reader<D: DrawTarget<Color = Rgb565>>(
 	display: &mut D,
 	mut reader: impl Read,
 	chunk_height: u32
@@ -403,4 +471,4 @@ pub fn chunked_draw_from_bitmap_reader<D: DrawTarget<Color = Rgb565>>(
 	}
 
 	Ok(())
-}
+}*/
