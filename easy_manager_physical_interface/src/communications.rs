@@ -1,11 +1,22 @@
+use std::borrow::Borrow;
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_int, c_uchar};
+use std::ops::Range;
 use std::rc::Rc;
 use std::str::FromStr;
-
+use std::sync::{Arc, Mutex};
 use anyhow::Context;
+use cstr_core::cstr;
+use easy_manager_core::get_core_version;
+use easy_manager_core::packets::CLIENT_VERSION_HN;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
+use embedded_svc::http::Method;
+use embedded_svc::http::client::{Client, Response};
 use embedded_svc::wifi::{AuthMethod, ClientConfiguration};
+use esp_idf_hal::gpio::OutputPin;
 use esp_idf_hal::io::asynch::Write;
+use esp_idf_hal::spi::{SpiDeviceDriver, SpiDriver, SpiError};
 use esp_idf_hal::sys::{
 	esp_eap_client_set_identity,
 	esp_eap_client_set_password,
@@ -14,11 +25,172 @@ use esp_idf_hal::sys::{
 	esp_wifi_sta_enterprise_enable
 };
 use esp_idf_hal::uart::{AsyncUartDriver, UartDriver};
+use esp_idf_hal::units::Hertz;
+use esp_idf_svc::http::client::EspHttpConnection;
 use esp_idf_svc::nvs::{EspNvs, NvsDefault};
 use esp_idf_svc::wifi::{AsyncWifi, Configuration as WifiConfiguration, EspWifi};
 use log::{debug, error, info, warn};
+use lvgl::widgets::Label;
+use lvgl::{LvResult, Screen};
+use mfrc522::comm::blocking::spi::{DummyDelay, SpiInterface};
+use mfrc522::{Error, Initialized, Mfrc522, MifareKey, Uid};
 
+use crate::graphics::{Theme, Unipage, WidgetFactory};
+use crate::lcd::InteractableDisplay;
 use crate::uart_read_line;
+
+type RfidInner<'s, SPI, T> = Mfrc522<SpiInterface<SpiDeviceDriver<'s, SPI>, DummyDelay>, T>;
+
+pub struct CommunicationManager<'s> {
+	pub http:            Client<EspHttpConnection>,
+	pub rfid:            RfidReader<'s, &'s SpiDriver<'s>, fn(&Uid, u8) -> MifareKey>,
+	pub request_signal: Signal<
+		CriticalSectionRawMutex,
+		(
+			Method,
+			String,
+			Vec<(String, String)>,
+			Box<
+				dyn FnOnce(
+						Response<&mut EspHttpConnection>,
+						WidgetFactory<Screen>,
+						&'static dyn Theme,
+						&mut InteractableDisplay
+					) -> LvResult<()>
+					+ 'static
+			>
+		)
+	>,
+	pub response_signal: Signal<
+		CriticalSectionRawMutex,
+		(
+			Vec<u8>,
+			Box<
+				dyn FnOnce(
+						Vec<u8>,
+						WidgetFactory<Screen>,
+						&'static dyn Theme,
+						&mut InteractableDisplay
+					) -> LvResult<()>
+					+ 'static
+			>
+		)
+	>
+}
+
+impl<'s> CommunicationManager<'s> {
+	pub fn new(
+		http: Client<EspHttpConnection>,
+		rfid: RfidReader<'s, &'s SpiDriver<'s>, fn(&Uid, u8) -> MifareKey>
+	) -> Self {
+		Self {
+			http,
+			rfid,
+			request_signal: Signal::new(),
+			response_signal: Signal::new()
+		}
+	}
+
+	pub fn make_http_request<'a>(
+		self: Arc<Mutex<Self>>,
+		method: Method,
+		uri: String,
+		mut headers: Vec<(String, String)>,
+		theme: &'static impl Theme,
+		display: &mut InteractableDisplay<'a>,
+		done: impl FnOnce(
+			Response<&mut EspHttpConnection>,
+			WidgetFactory<Screen>,
+			&'static dyn Theme,
+			&mut InteractableDisplay
+		) -> LvResult<()>
+		+ 'static
+	) -> anyhow::Result<()> {
+		let loading_page = Unipage::try_new(theme, display, self, Self::loading_page)?;
+		display.push_page(loading_page);
+		let hdrs = [(CLIENT_VERSION_HN.into(), get_core_version().into())];
+		headers.extend_from_slice(&hdrs);
+		self.request_signal
+			.signal((method, uri.into(), headers, Box::new(done)));
+		Ok(())
+	}
+
+	fn loading_page(
+		mut wf: WidgetFactory<Screen>,
+		theme: &impl Theme,
+		_display: &mut InteractableDisplay,
+		_communication_manager: &mut CommunicationManager
+	) -> LvResult<()> {
+		let mut label = wf.create_widget(Label::create)?;
+		label.set_text_static(cstr!("loading"));
+		theme.primary_label(&mut label);
+
+		Ok(())
+	}
+}
+
+pub struct RfidReader<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> MifareKey> {
+	inner:  RfidInner<'s, SPI, Initialized>,
+	key_cb: K
+}
+
+impl<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> MifareKey> RfidReader<'s, SPI, K> {
+	pub fn new(spi: SPI, cs: Option<impl OutputPin + 's>, key_cb: K) -> anyhow::Result<Self> {
+		let mut rfid_reader_spi_config = esp_idf_hal::spi::config::Config::default();
+		rfid_reader_spi_config.baudrate = Hertz(1_000_000);
+		let rfid_reader_device = SpiDeviceDriver::new(spi, cs, &rfid_reader_spi_config)
+			.context("failed to create RFID reader SPI device")?;
+		let rfid_interface = SpiInterface::new(rfid_reader_device);
+		let inner = Mfrc522::new(rfid_interface)
+			.init()
+			.context("failed to initialise RFID reader")?;
+
+		Ok(Self { inner, key_cb })
+	}
+
+	pub fn reqa_collect_data(
+		&mut self,
+		blocks: Range<u8>
+	) -> Result<Option<Vec<u8>>, Error<SpiError>> {
+		let mut out = Vec::new();
+		let atqa = match self.inner.reqa() {
+			Ok(atqa) => atqa,
+			Err(Error::Timeout) => return Ok(None),
+			Err(err) => return Err(err)
+		};
+		let uid = self.inner.select(&atqa)?;
+		for block in blocks {
+			self.inner
+				.mf_authenticate(&uid, block, &self.key_cb.call((&uid, block)))?;
+			out.push(self.inner.mf_read(block)?);
+		}
+		self.inner.hlta()?;
+		self.inner.stop_crypto1()?;
+		Ok(Some(out.concat()))
+	}
+
+	pub fn reqa_write_data(
+		&mut self,
+		data: impl IntoIterator<Item = (u8, [u8; 16])>
+	) -> Result<bool, Error<SpiError>> {
+		let atqa = match self.inner.reqa() {
+			Ok(atqa) => atqa,
+			Err(Error::Timeout) => return Ok(false),
+			Err(err) => return Err(err)
+		};
+		let uid = self.inner.select(&atqa)?;
+		for (block, data) in data {
+			self.inner
+				.mf_authenticate(&uid, block, &self.key_cb.call((&uid, block)))?;
+			while self.inner.mf_read(block)? != data {
+				self.inner.mf_write(block, data)?;
+			}
+		}
+		self.inner.hlta()?;
+		self.inner.stop_crypto1()?;
+		Ok(true)
+	}
+}
 
 async fn create_new_wifi_config(
 	uart: &mut AsyncUartDriver<'static, UartDriver<'static>>,

@@ -2,9 +2,9 @@
 name = "easy_manager_physical_interface"
 version = "0.1.0"
 authors = ["Drew Bryan <drewbryan08@gmail.com>"]
-edition = "2021"
+edition = "2024"
 resolver = "2"
-rust-version = "1.82"
+rust-version = "1.85.0"
 
 [[bin]]
 name = "easy_manager_physical_interface"
@@ -38,6 +38,8 @@ embedded-hal = "1.0.0"
 
 embassy-executor = {  version = "0.10.0", features = ["platform-std", "executor-thread"] }
 embassy-time = { version = "0.5" }
+embassy-sync = "0.8.0"
+embassy-futures = "0.1.2"
 
 lvgl = { version = "0.6.2", default-features = false, features = ["embedded_graphics", "unsafe_no_autoinit", "nightly"] }
 

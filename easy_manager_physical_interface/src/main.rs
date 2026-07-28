@@ -6,11 +6,10 @@
 #![feature(push_mut)]
 #![feature(ptr_as_ref_unchecked)]
 
+mod communications;
 mod graphics;
 pub mod lcd;
 mod pages;
-pub mod rfid;
-pub mod wifi;
 
 use std::cell::Cell;
 use std::panic;
@@ -20,7 +19,7 @@ use std::rc::Rc;
 use cstr_core::CString;
 use embassy_executor::Spawner;
 use embassy_time::Timer;
-use embedded_svc::http::client::Client;
+use embedded_svc::http::asynch::client::Client;
 use esp_idf_hal::rmt::config::{MemoryAccess, TxChannelConfig};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::gpio::{Gpio0, Gpio1};
@@ -36,12 +35,12 @@ use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
 use esp_idf_svc::timer::EspTaskTimerService;
 use esp_idf_svc::wifi::{AsyncWifi, EspWifi};
 use log::{LevelFilter, debug, error, info};
+use mfrc522::{MifareKey, Uid};
 use rgb::RGB8;
 use rustyfarian_esp_idf_ws2812::Ws2812Rmt;
 
+use crate::communications::{CommunicationManager, RfidReader, run_wifi};
 use crate::lcd::run_lcd;
-use crate::rfid::RfidReader;
-use crate::wifi::run_wifi;
 
 fn panic(panic_info: &PanicHookInfo) {
 	error!("Panicked:  {panic_info}");
@@ -103,8 +102,9 @@ async fn main(spawner: Spawner) {
 
 	let mut led_driver =
 		Ws2812Rmt::new_with_channel_config(peripherals.pins.gpio25, led_channel_config).unwrap();
-	led_driver.set_pixel(RGB8::new(127, 127, 127)).unwrap();
-	led_driver.set_pixel(RGB8::new(0, 127, 0)).unwrap();
+	led_driver
+		.set_pixel(RGB8::new(0 /* green */, 255, 0))
+		.unwrap();
 
 	let spi2 = SpiDriver::new(
 		peripherals.spi2,
@@ -155,8 +155,25 @@ async fn main(spawner: Spawner) {
 	let wifi_nvs_partition = EspNvs::new(nvs, "wifi", true).expect("Failed to get NVS namespace");
 	let wifi_is_connected = Rc::new(Cell::new(false));
 
+	let http_config = HTTPConfiguration {
+		crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
+		..Default::default()
+	};
+
+	let mut http_client =
+		Client::wrap(EspHttpConnection::new(&http_config).expect("Failed to create HTTP client"));
+
+	let mut rfid_device = RfidReader::new(&spi3, Some(peripherals.pins.gpio5), |uid, _| {
+		info!("uid: {:?}", uid.as_bytes());
+		[0xff; 6]
+	})
+	.unwrap_or_else(|err| panic!("Failed to create RFID device ({err})"));
+
+	let communications_manager = CommunicationManager::new(http_client, rfid_device);
+
 	spawner.spawn(
 		run_lcd(
+			communications_manager,
 			spi2,
 			peripherals.pins.gpio15.degrade_output(),
 			peripherals.pins.gpio26.degrade_output(),
@@ -177,24 +194,7 @@ async fn main(spawner: Spawner) {
 		)
 		.unwrap_or_else(|err| panic!("Failed to obtain WiFi task token ({err})"))
 	);
-
-	let http_config = HTTPConfiguration {
-		crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
-		..Default::default()
-	};
-
-	let mut http_client =
-		Client::wrap(EspHttpConnection::new(&http_config).expect("Failed to create HTTP client"));
-
-	debug!("Created HTTP client");
-
 	info!("Completed setup");
-
-	let mut rfid_device = RfidReader::new(&spi3, Some(peripherals.pins.gpio5), |uid, _| {
-		info!("uid: {:?}", uid.as_bytes());
-		[0xff; 6]
-	})
-	.unwrap_or_else(|err| panic!("Failed to create RFID device ({err})"));
 
 	loop {
 		Timer::after_millis(5).await;
@@ -213,7 +213,7 @@ async fn main(spawner: Spawner) {
 			error!("Failed to write RFID tag ({err})");
 		}
 
-		/*if !wifi_is_connected.get() {
+		if !wifi_is_connected.get() {
 			continue;
 		}
 
@@ -236,6 +236,6 @@ async fn main(spawner: Spawner) {
 			}
 		};
 
-		info!("Status: {}", response.status());*/
+		info!("Status: {}", response.status());
 	}
 }

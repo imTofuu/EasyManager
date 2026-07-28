@@ -1,18 +1,32 @@
 use std::cell::UnsafeCell;
+use std::sync::{Arc, Mutex};
 
 use lvgl::font::Font;
-use lvgl::style::{FlexFlow, Layout, Opacity, Style};
+use lvgl::style::{FlexAlign, FlexFlow, Layout, Opacity, Style};
 use lvgl::sys::{
+	LV_PART_INDICATOR,
+	LV_PART_MAIN,
+	LV_STATE_CHECKED,
+	LV_STATE_FOCUSED,
 	lv_group_create,
 	lv_group_del,
 	lv_group_set_default,
 	lv_group_t,
 	lv_indev_set_group,
-	lv_indev_t
+	lv_indev_t,
+	lv_obj_add_style,
+	lv_opa_t,
+	lv_style_init,
+	lv_style_set_bg_color,
+	lv_style_set_bg_opa,
+	lv_style_set_outline_color,
+	lv_style_set_text_color,
+	lv_style_t
 };
-use lvgl::widgets::{Btn, Label};
-use lvgl::{Align, Color, LvResult, NativeObject, Part, Screen, Widget};
+use lvgl::widgets::{Btn, Label, List, Switch};
+use lvgl::{Color, LvResult, NativeObject, Obj, Part, Screen, TextAlign, Widget};
 
+use crate::communications::CommunicationManager;
 use crate::lcd::InteractableDisplay;
 
 pub struct StyleCell {
@@ -33,20 +47,40 @@ impl StyleCell {
 	}
 }
 
-pub struct WidgetFactory<'p, P: NativeObject>(&'p mut P);
+pub struct RawStyleCell {
+	inner: UnsafeCell<lv_style_t>
+}
+
+impl RawStyleCell {
+	pub fn new() -> Self {
+		let mut style = lv_style_t::default();
+		unsafe {
+			lv_style_init(&mut style as *mut lv_style_t);
+		}
+		Self {
+			inner: UnsafeCell::new(style)
+		}
+	}
+
+	pub unsafe fn inner(&self) -> *mut lv_style_t {
+		self.inner.as_mut_unchecked() as *mut lv_style_t
+	}
+}
+
+pub struct WidgetFactory<'p, P: NativeObject + 'p>(&'p mut P);
 impl<'p, P: NativeObject> WidgetFactory<'p, P> {
 	pub fn create_widget<'a, W: Widget<'a>>(
-		&mut self,
-		constr: impl FnOnce(&mut P) -> LvResult<W>
+		&'a mut self,
+		constr: impl FnOnce(&'a mut P) -> LvResult<W>
 	) -> LvResult<W> {
 		constr(self.0)
 	}
 
 	pub fn create_parent_widget<'a, W: Widget<'a>, T: Theme>(
-		&mut self,
-		constr: impl FnOnce(&mut P) -> LvResult<W>,
-		theme: &'a T,
-		init: impl FnOnce(WidgetFactory<W>, &'a T) -> LvResult<()>
+		&'a mut self,
+		constr: impl FnOnce(&'a mut P) -> LvResult<W>,
+		theme: &'static T,
+		init: impl FnOnce(WidgetFactory<W>, &'static T) -> LvResult<()>
 	) -> LvResult<W> {
 		let mut w = self.create_widget(constr)?;
 		let wf = WidgetFactory(&mut w);
@@ -63,12 +97,14 @@ pub struct Unipage<'a> {
 impl<'a> Unipage<'a> {
 	/// It is UB to drop the Unipage instance from init
 	pub fn try_new<T: Theme>(
-		theme: &'a T,
+		theme: &'static T,
 		display: &mut InteractableDisplay<'a>,
+		communication_manager: Arc<Mutex<CommunicationManager>>,
 		init: impl FnOnce(
 			WidgetFactory<Screen<'a>>,
-			&'a T,
-			&mut InteractableDisplay<'a>
+			&'static T,
+			&mut InteractableDisplay<'a>,
+			Arc<Mutex<CommunicationManager>>
 		) -> LvResult<()>
 	) -> LvResult<Self> {
 		let mut screen = Screen::blank()?;
@@ -78,7 +114,7 @@ impl<'a> Unipage<'a> {
 		unsafe { lv_group_set_default(group) };
 
 		let wf = WidgetFactory(&mut screen);
-		init(wf, theme, display)?;
+		init(wf, theme, display, communication_manager)?;
 
 		Ok(Self {
 			inner: screen,
@@ -106,20 +142,41 @@ impl<'a> Drop for Unipage<'a> {
 
 pub trait Theme {
 	// Swap blue and red when making colours
-	fn dominant() -> Color;
-	fn secondary() -> Color;
-	fn accent() -> Color;
-	fn text() -> Color;
+	fn dominant(&self) -> Color;
+	fn secondary(&self) -> Color;
+	fn accent(&self) -> Color;
+	fn text(&self) -> Color;
 
 	fn screen<'a>(&'a self, widget: &mut Screen<'a>);
+	fn list<'a>(&'a self, widget: &mut List<'a>);
+	fn option_container<'a>(&'a self, widget: &mut Obj<'a>);
+	fn switch<'a>(&'a self, widget: &mut Switch<'a>);
 
 	fn primary_label<'a>(&'a self, widget: &mut Label<'a>);
+	fn secondary_label<'a>(&'a self, widget: &mut Label<'a>);
+	fn misc_label<'a>(&'a self, widget: &mut Label<'a>);
 
 	fn primary_button<'a>(&'a self, widget: &mut Btn<'a>);
+	fn secondary_button<'a>(&'a self, widget: &mut Btn<'a>);
+	fn misc_button<'a>(&'a self, widget: &mut Btn<'a>);
 }
 
 pub struct ModernTheme {
+	pub dominant:  Color,
+	pub secondary: Color,
+	pub accent:    Color,
+	pub text:      Color,
+
 	pub screen: StyleCell,
+
+	pub list: StyleCell,
+
+	pub option_container: StyleCell,
+
+	pub switch:           StyleCell,
+	//pub switch_hover: RawStyleCell,
+	pub switch_indicator: RawStyleCell,
+	pub switch_knob:      StyleCell,
 
 	pub primary_label:   StyleCell,
 	pub secondary_label: StyleCell,
@@ -127,74 +184,201 @@ pub struct ModernTheme {
 
 	pub primary_button:   StyleCell,
 	pub secondary_button: StyleCell,
-	pub misc_button:      StyleCell
+	pub misc_button:      StyleCell,
+	pub button_hover:     RawStyleCell
 }
 
 impl Theme for ModernTheme {
-	fn dominant() -> Color { Color::from_rgb((0xe9, 0xf5, 0xfc)) }
-	fn secondary() -> Color { Color::from_rgb((0x10, 0x50, 0x70)) }
-	fn accent() -> Color { Color::from_rgb((0x20, 0x9f, 0xdf)) }
-	fn text() -> Color { Color::from_rgb((0x08, 0x0e, 0x11)) }
+	fn dominant(&self) -> Color { self.dominant }
+	fn secondary(&self) -> Color { self.secondary }
+	fn accent(&self) -> Color { self.accent }
+	fn text(&self) -> Color { self.text }
 
 	fn screen<'a>(&'a self, widget: &mut Screen<'a>) { self.screen.apply(Part::Main, widget); }
+
+	fn list<'a>(&'a self, widget: &mut List<'a>) { self.list.apply(Part::Main, widget); }
+
+	fn option_container<'a>(&'a self, widget: &mut Obj<'a>) {
+		self.option_container.apply(Part::Main, widget);
+	}
+
+	fn switch<'a>(&'a self, widget: &mut Switch<'a>) {
+		self.switch.apply(Part::Main, widget);
+		self.switch_knob.apply(Part::Knob, widget);
+		unsafe {
+			lv_obj_add_style(
+				widget.raw().as_ptr(),
+				self.switch_indicator.inner(),
+				LV_PART_INDICATOR | LV_STATE_CHECKED
+			);
+		}
+	}
 
 	fn primary_label<'a>(&'a self, widget: &mut Label<'a>) {
 		self.primary_label.apply(Part::Main, widget);
 	}
 
+	fn secondary_label<'a>(&'a self, widget: &mut Label<'a>) {
+		self.secondary_label.apply(Part::Main, widget);
+	}
+
+	fn misc_label<'a>(&'a self, widget: &mut Label<'a>) {
+		self.misc_label.apply(Part::Main, widget);
+	}
+
 	fn primary_button<'a>(&'a self, widget: &mut Btn<'a>) {
 		self.primary_button.apply(Part::Main, widget);
+		unsafe {
+			lv_obj_add_style(
+				widget.raw().as_ptr(),
+				self.button_hover.inner(),
+				LV_PART_MAIN | LV_STATE_FOCUSED
+			);
+		}
+	}
+
+	fn secondary_button<'a>(&'a self, widget: &mut Btn<'a>) {
+		self.secondary_button.apply(Part::Main, widget);
+		unsafe {
+			lv_obj_add_style(
+				widget.raw().as_ptr(),
+				self.button_hover.inner(),
+				LV_PART_MAIN | LV_STATE_FOCUSED
+			);
+		}
+	}
+
+	fn misc_button<'a>(&'a self, widget: &mut Btn<'a>) {
+		self.misc_button.apply(Part::Main, widget);
+		unsafe {
+			lv_obj_add_style(
+				widget.raw().as_ptr(),
+				self.button_hover.inner(),
+				LV_PART_MAIN | LV_STATE_FOCUSED
+			);
+		}
 	}
 }
 
 impl ModernTheme {
 	pub fn new() -> Self {
+		let dominant = Color::from_rgb((0xe9, 0xf5, 0xfc));
+		let secondary = Color::from_rgb((0x10, 0x50, 0x70));
+		let accent = Color::from_rgb((0x20, 0x9f, 0xdf));
+		let text = Color::from_rgb((0x08, 0x0e, 0x11));
 		Self {
+			dominant,
+			secondary,
+			accent,
+			text,
+
 			screen: {
 				let mut style = Style::default();
-				style.set_bg_color(Self::dominant());
+				style.set_bg_color(dominant);
 				style.set_layout(Layout::flex());
 				style.set_flex_flow(FlexFlow::COLUMN);
-				style.set_flex_grow(1);
-				style.set_align(Align::Center);
+				style.set_flex_main_place(FlexAlign::START);
+				style.set_flex_cross_place(FlexAlign::CENTER);
+				style.set_pad_left(5);
+				style.set_pad_right(5);
 				StyleCell::new(style)
 			},
 
-			primary_label:   {
+			list: {
 				let mut style = Style::default();
-				style.set_text_color(Self::accent());
+				style.set_bg_color(dominant);
+				style.set_pad_top(5);
+				style.set_pad_left(5);
+				style.set_pad_right(5);
+				style.set_pad_row(10);
+				StyleCell::new(style)
+			},
+
+			option_container: {
+				let mut style = Style::default();
+				style.set_flex_flow(FlexFlow::ROW_WRAP);
+				style.set_border_opa(Opacity::OPA_0);
+				style.set_bg_opa(Opacity::OPA_0);
+				StyleCell::new(style)
+			},
+
+			switch: {
+				let mut style = Style::default();
+				style.set_bg_color(text);
+				StyleCell::new(style)
+			},
+			switch_indicator: {
+				let style = RawStyleCell::new();
+				unsafe {
+					let ptr = style.inner();
+
+					lv_style_set_bg_color(ptr, accent.into());
+				}
+				style
+			},
+			switch_knob: {
+				let mut style = Style::default();
+				style.set_shadow_opa(Opacity::OPA_40);
+				style.set_shadow_width(16);
+				style.set_shadow_ofs_y(2);
+				StyleCell::new(style)
+			},
+
+			primary_label: {
+				let mut style = Style::default();
+				style.set_text_color(accent);
 				style.set_text_font(Font::montserrat_40());
+				style.set_text_align(TextAlign::Center);
 				StyleCell::new(style)
 			},
 			secondary_label: {
 				let mut style = Style::default();
-				style.set_text_color(Self::secondary());
+				style.set_text_color(secondary);
+				style.set_text_font(Font::montserrat_20());
+				style.set_text_align(TextAlign::Center);
 				StyleCell::new(style)
 			},
-			misc_label:      {
+			misc_label: {
 				let mut style = Style::default();
-				style.set_text_color(Self::text());
+				style.set_text_color(text);
 				StyleCell::new(style)
 			},
 
-			primary_button:   {
+			primary_button: {
 				let mut style = Style::default();
-				style.set_bg_color(Self::accent());
-				style.set_text_color(Self::dominant());
+				style.set_bg_color(accent);
+				style.set_text_color(dominant);
+				style.set_text_align(TextAlign::Center);
 				StyleCell::new(style)
 			},
 			secondary_button: {
 				let mut style = Style::default();
-				style.set_bg_opa(Opacity::empty());
-				style.set_text_color(Self::accent());
+				style.set_bg_opa(Opacity::OPA_0);
+				style.set_text_color(secondary);
 				style.set_outline_width(3);
-				style.set_outline_color(Self::accent());
+				style.set_outline_color(secondary);
+				style.set_text_align(TextAlign::Center);
 				StyleCell::new(style)
 			},
-			misc_button:      {
+			misc_button: {
 				let mut style = Style::default();
-				style.set_text_color(Self::text());
+				style.set_bg_opa(Opacity::OPA_0);
+				style.set_text_color(accent);
+				style.set_shadow_opa(Opacity::OPA_0);
+				style.set_text_align(TextAlign::Center);
 				StyleCell::new(style)
+			},
+			button_hover: {
+				let style = RawStyleCell::new();
+				unsafe {
+					let ptr = style.inner();
+
+					lv_style_set_bg_opa(ptr, lv_opa_t::MAX);
+					lv_style_set_bg_color(ptr, secondary.into());
+					lv_style_set_text_color(ptr, dominant.into());
+					lv_style_set_outline_color(ptr, secondary.into());
+				}
+				style
 			}
 		}
 	}

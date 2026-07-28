@@ -1,11 +1,14 @@
 use std::ffi::{c_int, c_void};
 use std::io::Read;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI16, Ordering};
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use arrayvec::ArrayVec;
+use embassy_futures::select::{Either, Select, select};
 use embassy_time::Timer;
 use embedded_sdmmc::{BlockDevice, File, TimeSource, Timestamp};
 use esp_idf_hal::gpio::{
@@ -52,7 +55,6 @@ use lvgl::sys::{
 	lv_group_set_default,
 	lv_indev_data_t,
 	lv_indev_drv_register,
-	lv_indev_drv_t,
 	lv_indev_set_group,
 	lv_indev_state_t,
 	lv_indev_state_t_LV_INDEV_STATE_PRESSED,
@@ -60,7 +62,9 @@ use lvgl::sys::{
 	lv_indev_t
 };
 use lvgl::{Display, DrawBuffer};
+use mfrc522::{MifareKey, Uid};
 
+use crate::communications::{CommunicationManager, RfidReader};
 use crate::graphics::{ModernTheme, Unipage};
 use crate::pages::main_page;
 
@@ -198,7 +202,7 @@ impl<'a> InteractableDisplay<'a> {
 		let panel_io_config = esp_lcd_panel_io_spi_config_t {
 			dc_gpio_num: dc.pin() as c_int,
 			cs_gpio_num: cs.pin() as c_int,
-			pclk_hz: 10 * 1000 * 1000,
+			pclk_hz: 80 * 1000 * 1000,
 			lcd_cmd_bits: 8,
 			lcd_param_bits: 8,
 			spi_mode: 0,
@@ -325,7 +329,7 @@ impl<'a> InteractableDisplay<'a> {
 		})
 	}
 
-	pub fn push_page(&mut self, page: Unipage<'a>) {
+	pub(crate) fn push_page(&mut self, page: Unipage<'a>) {
 		// todo fix this panic
 		self.page_stack.push(Box::new(page));
 
@@ -343,7 +347,7 @@ impl<'a> InteractableDisplay<'a> {
 		self.display.set_scr_act(new_top_screen.screen());
 	}
 
-	pub fn pop_page(&mut self) -> Option<Unipage<'a>> {
+	pub(crate) fn pop_page(&mut self) -> Option<Unipage<'a>> {
 		assert_ne!(self.page_stack.len(), 1, "Attempting to pop main screen");
 
 		let new_top_screen = unsafe {
@@ -362,8 +366,42 @@ impl<'a> InteractableDisplay<'a> {
 	}
 }
 
+fn http_request_fulfiller(communication_manager: Arc<Mutex<CommunicationManager>>) {
+	loop {
+		if let Some((method, uri, headers, done)) = communication_manager
+			.lock()
+			.unwrap()
+			.request_signal
+			.try_take()
+		{
+			let mut comm = communication_manager.lock().unwrap();
+			let hdrs: Vec<(&str, &str)> = headers
+				.iter()
+				.map(|(key, val)| (key.as_str(), val.as_str()))
+				.collect();
+			let req = comm
+				.http
+				.request(method, uri.as_str(), hdrs.as_slice())
+				.unwrap();
+			let mut response = req.submit().unwrap();
+
+			let mut body = Vec::new();
+			let mut total = 0;
+			while let Ok(n) = response.read(&mut body[total..])
+				&& n != 0
+			{
+				total += n;
+			}
+
+			comm.response_signal.signal((body, done));
+		}
+		sleep(Duration::from_millis(100));
+	}
+}
+
 #[embassy_executor::task]
 pub async fn run_lcd(
+	mut communication_manager: Arc<Mutex<CommunicationManager<'static>>>,
 	spi: SpiDriver<'static>,
 	cs: AnyOutputPin<'static>,
 	dc: AnyOutputPin<'static>,
@@ -380,20 +418,43 @@ pub async fn run_lcd(
 	let mut display = InteractableDisplay::new(&spi, cs, dc, rst, enc_clk, enc_dt, enc_sw)
 		.unwrap_or_else(|err| panic!("Failed to create LCD ({err})"));
 
+	let f_cm = communication_manager.clone();
+	thread::spawn(move || http_request_fulfiller(f_cm));
+
 	// Create main page
-	let page = Unipage::try_new(theme, &mut display, main_page).unwrap();
+	let p_cm = communication_manager.clone();
+	let page = Unipage::try_new(theme, &mut display, p_cm, main_page).unwrap();
+	
 
 	display.push_page(page);
 
 	debug!("Starting LCD loop");
 	let mut last = Instant::now();
 	loop {
-		Timer::after_millis(5).await;
+		let d_cm = communication_manager.clone();
+		match select(
+			Timer::after_millis(5),
+			communication_manager.lock().unwrap().response_signal.wait()
+		)
+		.await
+		{
+			Either::Second((response, done)) => {
+				let page = Unipage::try_new(
+					theme,
+					&mut display,
+					d_cm,
+					|wf, theme, display, communication_manager| done(response, wf, theme, display)
+				)
+				.unwrap();
+				display.push_page(page);
+			}
+			_ => {}
+		}
+
+		lvgl::task_handler();
 
 		display.enc_clk.enable_interrupt().unwrap();
 		display.enc_sw.enable_interrupt().unwrap();
-
-		lvgl::task_handler();
 
 		let now = Instant::now();
 		lvgl::tick_inc(now - last);
