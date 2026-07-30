@@ -4,11 +4,12 @@ use std::io::Read;
 use std::sync::atomic::{AtomicI16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::thread::{sleep};
+use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use arrayvec::ArrayVec;
+use easy_manager_core::packets::ErrorPacket;
 use embassy_time::Timer;
 use embedded_sdmmc::{BlockDevice, File, TimeSource, Timestamp};
 use embedded_svc::http::client::Client;
@@ -65,7 +66,7 @@ use lvgl::sys::{
 };
 use lvgl::{Display, DrawBuffer};
 
-use crate::communications::PagePromise;
+use crate::communications::{HttpPromise, HttpWork};
 use crate::graphics::{ModernTheme, Unipage};
 use crate::pages::main_page;
 
@@ -132,7 +133,7 @@ pub struct InteractableDisplay<'a> {
 	page_stack: ArrayVec<Box<Unipage<'a>>, 64>,
 	indev:      *mut lv_indev_t,
 
-	promises: Arc<Mutex<VecDeque<PagePromise>>>,
+	promises: VecDeque<HttpPromise>,
 
 	enc_clk: PinDriver<'static, Input>,
 	enc_sw:  PinDriver<'static, Input>
@@ -324,15 +325,15 @@ impl<'a> InteractableDisplay<'a> {
 		Ok(Self {
 			display:    lvgl_display,
 			page_stack: ArrayVec::new(),
-			promises:   Arc::new(Mutex::new(VecDeque::new())),
+			promises:   VecDeque::new(),
 			indev:      encoder_ptr,
 			enc_clk:    clk,
 			enc_sw:     sw
 		})
 	}
 
-	pub fn add_promise(&mut self, page_promise: PagePromise) {
-		self.promises.lock().unwrap().push_back(page_promise);
+	pub fn add_promise(&mut self, page_promise: HttpPromise) {
+		self.promises.push_back(page_promise);
 	}
 
 	pub fn push_page(&mut self, page: Unipage<'a>) {
@@ -374,8 +375,8 @@ impl<'a> InteractableDisplay<'a> {
 
 fn request_fulfiller(
 	http_config: Configuration,
-	reqs: Arc<Mutex<VecDeque<PagePromise>>>,
-	res: Arc<Mutex<Option<Box<dyn FnOnce(&mut InteractableDisplay) + Send>>>>
+	req: Arc<Mutex<Option<Box<HttpWork>>>>,
+	res: Arc<Mutex<Option<Result<Vec<u8>, ErrorPacket>>>>
 ) {
 	let mut http =
 		Client::wrap(EspHttpConnection::new(&http_config).expect("Failed to create HTTP client"));
@@ -385,12 +386,11 @@ fn request_fulfiller(
 		if res.lock().unwrap().is_some() {
 			continue;
 		}
-		let req = match reqs.lock().unwrap().pop_front() {
-			Some(req) => req,
-			None => continue
-		};
-		let complete = req.work.call_once((&mut http,));
-		*res.lock().unwrap() = Some(complete);
+		let req = req.lock().unwrap().take();
+		if let Some(req) = req {
+			let data = req.call_once((&mut http,));
+			*res.lock().unwrap() = Some(data);
+		}
 	}
 }
 
@@ -413,13 +413,16 @@ pub async fn run_lcd(
 	let mut display = InteractableDisplay::new(&spi, cs, dc, rst, enc_clk, enc_dt, enc_sw)
 		.unwrap_or_else(|err| panic!("Failed to create LCD ({err})"));
 
-	let completed_request = Arc::new(Mutex::new(None));
+	let mut current_request_done = None;
+	let http_request = Arc::new(Mutex::new(None));
+	let http_response = Arc::new(Mutex::new(None));
 
-	let fulfiller_responses = completed_request.clone();
-	let fulfiller_requests = display.promises.clone();
+	let fulfiller_request = http_request.clone();
+	let fulfiller_response = http_response.clone();
 	thread::Builder::new()
 		.stack_size(8196)
-		.spawn(move || request_fulfiller(http_config, fulfiller_requests, fulfiller_responses)).unwrap();
+		.spawn(move || request_fulfiller(http_config, fulfiller_request, fulfiller_response))
+		.unwrap();
 
 	// Create main page
 	let page = Unipage::try_new(theme, &mut display, main_page).unwrap();
@@ -431,10 +434,25 @@ pub async fn run_lcd(
 	loop {
 		Timer::after_millis(5).await;
 
+		if current_request_done.is_none() {
+			if let Some(HttpPromise { work, done }) = display.promises.pop_front() {
+				current_request_done = Some(done);
+				*http_request.lock().unwrap() = Some(work);
+			}
+		}
+
 		{
-			let mut comp = completed_request.lock().unwrap();
-			if let Some(comp) = comp.take() {
-				comp.call_once((&mut display,))
+			if let Some(res) = http_response.lock().unwrap().take() {
+				*http_request.lock().unwrap() = None;
+				match current_request_done.take() {
+					Some(promise) => {
+						promise.call_once((res, &mut display));
+					}
+					None => {
+						error!("HTTP response with no request");
+						debug_assert!(false);
+					}
+				}
 			}
 		}
 

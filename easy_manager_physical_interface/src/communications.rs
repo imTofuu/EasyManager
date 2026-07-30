@@ -36,76 +36,121 @@ use serde::de::DeserializeOwned;
 use crate::lcd::InteractableDisplay;
 use crate::uart_read_line;
 
-pub struct PagePromise {
-	pub work: Box<
-		dyn FnOnce(
-				&mut Client<EspHttpConnection>
-			) -> Box<dyn FnOnce(&mut InteractableDisplay) + Send>
-			+ Send
-	>
+pub type HttpWork =
+	dyn FnOnce(&mut Client<EspHttpConnection>) -> Result<Vec<u8>, ErrorPacket> + Send;
+pub type HttpPromiseClosure = dyn FnOnce(Result<Vec<u8>, ErrorPacket>, &mut InteractableDisplay);
+
+pub struct HttpPromise {
+	pub work: Box<HttpWork>,
+	pub done: Box<HttpPromiseClosure>
 }
 
-impl PagePromise {
+impl HttpPromise {
 	pub fn new<B: Serialize + Send + 'static, R: Serialize + DeserializeOwned + Send + 'static>(
 		method: Method,
 		uri: String,
 		body: Option<B>,
 		mut headers: Vec<(String, String)>,
-		promise_closure: impl FnOnce(Packet<R>, &mut InteractableDisplay) + 'static + Send
+		promise_closure: impl FnOnce(Packet<R>, &mut InteractableDisplay) + 'static
 	) -> Self {
-		let complete = move |http: &mut Client<EspHttpConnection>| -> Box<dyn FnOnce(&mut InteractableDisplay) + Send> {
-			headers.extend_from_slice(&[(CLIENT_VERSION_HN.into(), get_core_version().into()), ("Content-Type".into(), "application/json".into())]);
-			let hdrs: Vec<_> = headers
-				.iter()
-				.map(|(k, v)| (k.as_str(), v.as_str()))
-				.collect();
-			let mut req = match http.request(method, uri.as_str(), hdrs.as_slice()) {
-				Ok(req) => req,
-				Err(err) => return Box::new(move |display| promise_closure(Packet::Error(ErrorPacket { message: format!("Error creating request: {err}") }), display))
-			};
-			
-			if let Some(body) = body {
-				let mut serializer = serde_json::Serializer::new(Vec::new());
-				if let Err(err) = body.serialize(&mut serializer) {
-					return Box::new(move |display| promise_closure(Packet::Error(ErrorPacket { message: format!("Failed to serialize request body: {err}") }), display));
-				}
-				let body_json = serializer.into_inner();
-				if let Err(err) = req.connection().write_all(body_json.as_slice()) {
-					return Box::new(move |display| promise_closure(Packet::Error(ErrorPacket { message: format!("Failed to write request body: {err}") }), display));
-				}
-			}
-			
-			let mut res = match req.submit() {
-				Ok(res) => res,
-				Err(err) => return Box::new(move |display| promise_closure(Packet::Error(ErrorPacket { message: format!("Error making request: {err}") }), display))
-			};
-			
-			
-			let buffer_size = match res.header("Content-Length") {
-				Some(buffer_size) => {
-					match usize::from_str(buffer_size) {
-						Ok(buffer_size) => buffer_size,
-						Err(err) => return Box::new(move |display| promise_closure(Packet::Error(ErrorPacket { message: format!("Error parsing Content-Length header: {err}") }), display))
-					}
-				}
-				None => return Box::new(move |display| promise_closure(Packet::Error(ErrorPacket { message: "Missing header: Content-Length".to_string() }), display))
-			};
-			
-			let mut buf = vec![0u8; buffer_size];
-			if let Err(err) = res.read_exact(buf.as_mut_slice()) {
-				return Box::new(move |display| promise_closure(Packet::Error(ErrorPacket { message: format!("Error reading response body: {err}") }), display))
-			}
-
-			let packet: R = match serde_json::from_slice(buf.as_slice()) {
-				Ok(packet) => packet,
-				Err(err) => return Box::new(move |display| promise_closure(Packet::Error(ErrorPacket { message: format!("Failed to parse packet: {err}") }), display))
-			};
-			Box::new(move |display| {
-				promise_closure(Packet::Ok(packet), display);
-			})
-		};
 		Self {
-			work: Box::new(complete)
+			work: Box::new(
+				move |http: &mut Client<EspHttpConnection>| -> Result<Vec<u8>, ErrorPacket> {
+					headers.extend_from_slice(&[
+						(CLIENT_VERSION_HN.into(), get_core_version().into()),
+						("Content-Type".into(), "application/json".into())
+					]);
+					let hdrs: Vec<_> = headers
+						.iter()
+						.map(|(k, v)| (k.as_str(), v.as_str()))
+						.collect();
+					let mut req = match http.request(method, uri.as_str(), hdrs.as_slice()) {
+						Ok(req) => req,
+						Err(err) => {
+							return Err(ErrorPacket {
+								message: format!("Error creating request: {err}")
+							});
+						}
+					};
+
+					if let Some(body) = body {
+						let mut serializer = serde_json::Serializer::new(Vec::new());
+						if let Err(err) = body.serialize(&mut serializer) {
+							return Err(ErrorPacket {
+								message: format!("Failed to serialize request body: {err}")
+							});
+						}
+						let body_json = serializer.into_inner();
+						if let Err(err) = req.connection().write_all(body_json.as_slice()) {
+							return Err(ErrorPacket {
+								message: format!("Failed to write request body: {err}")
+							});
+						}
+					}
+
+					let mut res = match req.submit() {
+						Ok(res) => res,
+						Err(err) => {
+							return Err(ErrorPacket {
+								message: format!("Error making request: {err}")
+							});
+						}
+					};
+
+					let buffer_size = match res.header("Content-Length") {
+						Some(buffer_size) => {
+							match usize::from_str(buffer_size) {
+								Ok(buffer_size) => buffer_size,
+								Err(err) => {
+									return Err(ErrorPacket {
+										message: format!(
+											"Error parsing Content-Length header: {err}"
+										)
+									});
+								}
+							}
+						}
+						None => {
+							return Err(ErrorPacket {
+								message: "Missing header: Content-Length".to_string()
+							});
+						}
+					};
+
+					let mut buf = vec![0u8; buffer_size];
+					if let Err(err) = res.read_exact(buf.as_mut_slice()) {
+						return Err(ErrorPacket {
+							message: format!("Error reading response body: {err}")
+						});
+					}
+
+					Ok(buf)
+				}
+			),
+			done: Box::new(|data_result, display| {
+				let packet = match data_result {
+					Ok(data) => {
+						match serde_json::from_slice(data.as_slice()) {
+							Ok(packet) => Packet::Ok(packet),
+							Err(err1) => {
+								match serde_json::from_slice(data.as_slice()) {
+									Ok(packet) => Packet::Error(packet),
+									Err(err2) => {
+										Packet::Error(ErrorPacket {
+											message: format!(
+												"Failed to parse error packet: {err2}\nafter \
+												 failing to parse normal packet: {err1}"
+											)
+										})
+									}
+								}
+							}
+						}
+					}
+					Err(err) => Packet::Error(err)
+				};
+				promise_closure(packet, display);
+			})
 		}
 	}
 }

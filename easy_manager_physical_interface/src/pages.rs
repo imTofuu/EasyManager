@@ -1,13 +1,14 @@
-use cstr_core::cstr;
+use cstr_core::{CString, cstr};
+use easy_manager_core::AccountIdentifier;
 use easy_manager_core::packets::Packet;
 use easy_manager_core::packets::post::{LoginRequest, LoginResponse};
 use embedded_svc::http::Method;
 use esp_idf_sys::esp_restart;
-use log::{info, warn};
+use log::warn;
 use lvgl::widgets::{Btn, Dropdown, Label, List, Switch};
 use lvgl::{Align, Event, LvResult, Obj, Screen, Widget};
-use easy_manager_core::AccountIdentifier;
-use crate::communications::PagePromise;
+
+use crate::communications::HttpPromise;
 use crate::graphics::{Theme, Unipage, WidgetFactory};
 use crate::lcd::InteractableDisplay;
 
@@ -129,7 +130,6 @@ fn borrow_page<'a>(
 	back_button.on_event(|_, e| {
 		if let Event::Clicked = e {
 			display.pop_page();
-			return;
 		}
 	})?;
 
@@ -210,22 +210,28 @@ fn program_page<'a>(
 			program_button.on_event(|_, e| {
 				if let Event::Clicked = e {
 					let headers = vec![];
-					let promise = PagePromise::new(
+					let promise = HttpPromise::new(
 						Method::Post,
 						"https://api.easy.drewbryan.org/login".into(),
 						Some(LoginRequest {
-							account_identifier: AccountIdentifier::Username { username: "admin".into() },
-							password: "admin".into()
+							account_identifier: AccountIdentifier::Username {
+								username: "admin".into()
+							},
+							password:           "admin".into()
 						}),
 						headers,
 						|packet: Packet<LoginResponse>, display| {
 							match packet {
 								Packet::Ok(packet) => {
-									info!("{}", packet.session_id);
-									/*match page {
+									let page = Unipage::try_new(
+										theme,
+										display,
+										move |wf, theme, display| test(packet, wf, theme, display)
+									);
+									match page {
 										Ok(page) => display.push_page(page),
 										Err(err) => todo!()
-									}*/
+									}
 								}
 								Packet::Error(err) => {
 									warn!("{}", err.message);
@@ -244,6 +250,19 @@ fn program_page<'a>(
 		})?;
 	theme.option_container(&mut final_buttons_container);
 	final_buttons_container.set_width(percent(100));
+
+	Ok(())
+}
+
+fn test<'a>(
+	packet: LoginResponse,
+	mut wf: WidgetFactory<Screen<'_>>,
+	theme: &'static impl Theme,
+	_display: &mut InteractableDisplay<'a>
+) -> LvResult<()> {
+	let mut label = wf.create_widget(Label::create)?;
+	label.set_text(CString::new(packet.session_id).unwrap().as_c_str());
+	theme.primary_label(&mut label);
 
 	Ok(())
 }

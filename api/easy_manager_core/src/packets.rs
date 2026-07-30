@@ -2,7 +2,7 @@ use alloc::string::String;
 use core::error::Error;
 use core::fmt::{Display, Formatter};
 
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 pub const CLIENT_VERSION_HN: &str = "client-version";
 

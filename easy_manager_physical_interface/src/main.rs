@@ -5,6 +5,7 @@
 #![feature(unsafe_cell_access)]
 #![feature(push_mut)]
 #![feature(ptr_as_ref_unchecked)]
+#![warn(clippy::unwrap_used)]
 
 mod communications;
 mod graphics;
@@ -19,7 +20,6 @@ use std::rc::Rc;
 use cstr_core::CString;
 use embassy_executor::Spawner;
 use embassy_time::Timer;
-use embedded_svc::http::asynch::client::Client;
 use esp_idf_hal::rmt::config::{MemoryAccess, TxChannelConfig};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::gpio::{Gpio0, Gpio1};
@@ -29,7 +29,7 @@ use esp_idf_svc::hal::spi::config::DriverConfig;
 use esp_idf_svc::hal::uart::config::Config;
 use esp_idf_svc::hal::uart::{AsyncUartDriver, UartDriver};
 use esp_idf_svc::hal::units::Hertz;
-use esp_idf_svc::http::client::{Configuration as HTTPConfiguration, EspHttpConnection};
+use esp_idf_svc::http::client::Configuration as HTTPConfiguration;
 use esp_idf_svc::io::asynch::{Read, Write};
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
 use esp_idf_svc::timer::EspTaskTimerService;
