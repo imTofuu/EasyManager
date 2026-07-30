@@ -2,6 +2,8 @@ use alloc::string::String;
 use core::error::Error;
 use core::fmt::{Display, Formatter};
 
+use serde::{Deserialize, Deserializer};
+
 pub const CLIENT_VERSION_HN: &str = "client-version";
 
 #[derive(Debug, Clone)]
@@ -26,7 +28,8 @@ pub struct ErrorPacket {
 	pub message: String
 }
 
-pub enum Packet<T: serde::Serialize + serde::de::DeserializeOwned> {
+#[derive(Deserialize)]
+pub enum Packet<T: serde::Serialize> {
 	Ok(T),
 	Error(ErrorPacket)
 }

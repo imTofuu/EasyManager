@@ -1,11 +1,13 @@
-use std::sync::{Arc, Mutex};
-use cstr_core::{CStr, cstr};
+use cstr_core::cstr;
+use easy_manager_core::packets::Packet;
+use easy_manager_core::packets::post::{LoginRequest, LoginResponse};
 use embedded_svc::http::Method;
 use esp_idf_sys::esp_restart;
+use log::{info, warn};
 use lvgl::widgets::{Btn, Dropdown, Label, List, Switch};
 use lvgl::{Align, Event, LvResult, Obj, Screen, Widget};
-
-use crate::communications::CommunicationManager;
+use easy_manager_core::AccountIdentifier;
+use crate::communications::PagePromise;
 use crate::graphics::{Theme, Unipage, WidgetFactory};
 use crate::lcd::InteractableDisplay;
 
@@ -14,8 +16,7 @@ const fn percent(percent: u32) -> u32 { (1 << 13) | percent }
 pub fn main_page<'a>(
 	mut wf: WidgetFactory<Screen<'_>>,
 	theme: &'static impl Theme,
-	display: &mut InteractableDisplay<'a>,
-	communication_manager: Arc<Mutex<CommunicationManager>>
+	display: &mut InteractableDisplay<'a>
 ) -> LvResult<()> {
 	let mut title = wf.create_widget(Label::create)?;
 	theme.primary_label(&mut title);
@@ -39,7 +40,7 @@ pub fn main_page<'a>(
 		let mut new_page_result: LvResult<()> = Ok(());
 		borrow_button.on_event(|_, e| {
 			if let Event::Clicked = e {
-				match Unipage::try_new(theme, display, communication_manager.clone(), borrow_page) {
+				match Unipage::try_new(theme, display, borrow_page) {
 					Ok(page) => display.push_page(page),
 					Err(err) => new_page_result = Err(err)
 				}
@@ -68,7 +69,7 @@ pub fn main_page<'a>(
 		let mut new_page_result: LvResult<()> = Ok(());
 		program_button.on_event(|_, e| {
 			if let Event::Clicked = e {
-				match Unipage::try_new(theme, display, communication_manager.clone(), program_page) {
+				match Unipage::try_new(theme, display, program_page) {
 					Ok(page) => display.push_page(page),
 					Err(err) => new_page_result = Err(err)
 				}
@@ -112,8 +113,7 @@ pub fn main_page<'a>(
 fn borrow_page<'a>(
 	mut wf: WidgetFactory<Screen<'_>>,
 	theme: &'static impl Theme,
-	display: &mut InteractableDisplay<'a>,
-	communication_manager: Arc<Mutex<CommunicationManager>>
+	display: &mut InteractableDisplay<'a>
 ) -> LvResult<()> {
 	let mut label = wf.create_widget(Label::create)?;
 	theme.primary_label(&mut label);
@@ -139,8 +139,7 @@ fn borrow_page<'a>(
 fn program_page<'a>(
 	mut wf: WidgetFactory<Screen<'_>>,
 	theme: &'static impl Theme,
-	display: &mut InteractableDisplay<'a>,
-	communication_manager: Arc<Mutex<CommunicationManager>>
+	display: &mut InteractableDisplay<'a>
 ) -> LvResult<()> {
 	let mut label = wf.create_widget(Label::create)?;
 	theme.primary_label(&mut label);
@@ -210,26 +209,32 @@ fn program_page<'a>(
 			theme.primary_button(&mut program_button);
 			program_button.on_event(|_, e| {
 				if let Event::Clicked = e {
-					communication_manager.lock().unwrap()
-						.make_http_request(
-							Method::Get,
-							"https://google.com".into(),
-							vec![],
-							theme,
-							display,
-							|req, mut wf, theme, display| {
-								let mut label = wf.create_widget(Label::create)?;
-								label.set_text(
-									CStr::from_bytes_with_nul(
-										format!("{}\0", req.status()).as_bytes()
-									)
-									.unwrap()
-								);
-								theme.primary_label(&mut label);
-								Ok(())
+					let headers = vec![];
+					let promise = PagePromise::new(
+						Method::Post,
+						"https://api.easy.drewbryan.org/login".into(),
+						Some(LoginRequest {
+							account_identifier: AccountIdentifier::Username { username: "admin".into() },
+							password: "admin".into()
+						}),
+						headers,
+						|packet: Packet<LoginResponse>, display| {
+							match packet {
+								Packet::Ok(packet) => {
+									info!("{}", packet.session_id);
+									/*match page {
+										Ok(page) => display.push_page(page),
+										Err(err) => todo!()
+									}*/
+								}
+								Packet::Error(err) => {
+									warn!("{}", err.message);
+									todo!()
+								}
 							}
-						)
-						.unwrap();
+						}
+					);
+					display.add_promise(promise);
 				}
 			})?;
 			program_button.set_align(Align::RightMid, 0, 0);

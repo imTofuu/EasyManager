@@ -35,11 +35,10 @@ use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
 use esp_idf_svc::timer::EspTaskTimerService;
 use esp_idf_svc::wifi::{AsyncWifi, EspWifi};
 use log::{LevelFilter, debug, error, info};
-use mfrc522::{MifareKey, Uid};
 use rgb::RGB8;
 use rustyfarian_esp_idf_ws2812::Ws2812Rmt;
 
-use crate::communications::{CommunicationManager, RfidReader, run_wifi};
+use crate::communications::{RfidReader, run_wifi};
 use crate::lcd::run_lcd;
 
 fn panic(panic_info: &PanicHookInfo) {
@@ -160,20 +159,15 @@ async fn main(spawner: Spawner) {
 		..Default::default()
 	};
 
-	let mut http_client =
-		Client::wrap(EspHttpConnection::new(&http_config).expect("Failed to create HTTP client"));
-
 	let mut rfid_device = RfidReader::new(&spi3, Some(peripherals.pins.gpio5), |uid, _| {
 		info!("uid: {:?}", uid.as_bytes());
 		[0xff; 6]
 	})
 	.unwrap_or_else(|err| panic!("Failed to create RFID device ({err})"));
 
-	let communications_manager = CommunicationManager::new(http_client, rfid_device);
-
 	spawner.spawn(
 		run_lcd(
-			communications_manager,
+			http_config,
 			spi2,
 			peripherals.pins.gpio15.degrade_output(),
 			peripherals.pins.gpio26.degrade_output(),
@@ -213,7 +207,7 @@ async fn main(spawner: Spawner) {
 			error!("Failed to write RFID tag ({err})");
 		}
 
-		if !wifi_is_connected.get() {
+		/*if !wifi_is_connected.get() {
 			continue;
 		}
 
@@ -236,6 +230,6 @@ async fn main(spawner: Spawner) {
 			}
 		};
 
-		info!("Status: {}", response.status());
+		info!("Status: {}", response.status());*/
 	}
 }

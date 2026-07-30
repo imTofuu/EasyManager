@@ -1,16 +1,17 @@
+use std::collections::VecDeque;
 use std::ffi::{c_int, c_void};
 use std::io::Read;
 use std::sync::atomic::{AtomicI16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::thread::sleep;
+use std::thread::{sleep};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use arrayvec::ArrayVec;
-use embassy_futures::select::{Either, Select, select};
 use embassy_time::Timer;
 use embedded_sdmmc::{BlockDevice, File, TimeSource, Timestamp};
+use embedded_svc::http::client::Client;
 use esp_idf_hal::gpio::{
 	AnyInputPin,
 	AnyOutputPin,
@@ -25,6 +26,7 @@ use esp_idf_hal::gpio::{
 	Pull
 };
 use esp_idf_hal::spi::SpiDriver;
+use esp_idf_svc::http::client::{Configuration, EspHttpConnection};
 use esp_idf_sys::{
 	esp,
 	esp_lcd_new_panel_io_spi,
@@ -62,9 +64,8 @@ use lvgl::sys::{
 	lv_indev_t
 };
 use lvgl::{Display, DrawBuffer};
-use mfrc522::{MifareKey, Uid};
 
-use crate::communications::{CommunicationManager, RfidReader};
+use crate::communications::PagePromise;
 use crate::graphics::{ModernTheme, Unipage};
 use crate::pages::main_page;
 
@@ -130,6 +131,8 @@ pub struct InteractableDisplay<'a> {
 	display:    Display,
 	page_stack: ArrayVec<Box<Unipage<'a>>, 64>,
 	indev:      *mut lv_indev_t,
+
+	promises: Arc<Mutex<VecDeque<PagePromise>>>,
 
 	enc_clk: PinDriver<'static, Input>,
 	enc_sw:  PinDriver<'static, Input>
@@ -315,21 +318,24 @@ impl<'a> InteractableDisplay<'a> {
 		unsafe { lv_indev_set_group(encoder_ptr, group) };
 
 		unsafe {
-			//lv_group_add_obj(group, button1.raw().as_ptr());
-			//lv_group_add_obj(group, button2.raw().as_ptr());
 			lv_group_set_default(group);
 		}
 
 		Ok(Self {
 			display:    lvgl_display,
 			page_stack: ArrayVec::new(),
+			promises:   Arc::new(Mutex::new(VecDeque::new())),
 			indev:      encoder_ptr,
 			enc_clk:    clk,
 			enc_sw:     sw
 		})
 	}
 
-	pub(crate) fn push_page(&mut self, page: Unipage<'a>) {
+	pub fn add_promise(&mut self, page_promise: PagePromise) {
+		self.promises.lock().unwrap().push_back(page_promise);
+	}
+
+	pub fn push_page(&mut self, page: Unipage<'a>) {
 		// todo fix this panic
 		self.page_stack.push(Box::new(page));
 
@@ -347,7 +353,7 @@ impl<'a> InteractableDisplay<'a> {
 		self.display.set_scr_act(new_top_screen.screen());
 	}
 
-	pub(crate) fn pop_page(&mut self) -> Option<Unipage<'a>> {
+	pub fn pop_page(&mut self) -> Option<Unipage<'a>> {
 		assert_ne!(self.page_stack.len(), 1, "Attempting to pop main screen");
 
 		let new_top_screen = unsafe {
@@ -366,42 +372,31 @@ impl<'a> InteractableDisplay<'a> {
 	}
 }
 
-fn http_request_fulfiller(communication_manager: Arc<Mutex<CommunicationManager>>) {
+fn request_fulfiller(
+	http_config: Configuration,
+	reqs: Arc<Mutex<VecDeque<PagePromise>>>,
+	res: Arc<Mutex<Option<Box<dyn FnOnce(&mut InteractableDisplay) + Send>>>>
+) {
+	let mut http =
+		Client::wrap(EspHttpConnection::new(&http_config).expect("Failed to create HTTP client"));
+
 	loop {
-		if let Some((method, uri, headers, done)) = communication_manager
-			.lock()
-			.unwrap()
-			.request_signal
-			.try_take()
-		{
-			let mut comm = communication_manager.lock().unwrap();
-			let hdrs: Vec<(&str, &str)> = headers
-				.iter()
-				.map(|(key, val)| (key.as_str(), val.as_str()))
-				.collect();
-			let req = comm
-				.http
-				.request(method, uri.as_str(), hdrs.as_slice())
-				.unwrap();
-			let mut response = req.submit().unwrap();
-
-			let mut body = Vec::new();
-			let mut total = 0;
-			while let Ok(n) = response.read(&mut body[total..])
-				&& n != 0
-			{
-				total += n;
-			}
-
-			comm.response_signal.signal((body, done));
-		}
 		sleep(Duration::from_millis(100));
+		if res.lock().unwrap().is_some() {
+			continue;
+		}
+		let req = match reqs.lock().unwrap().pop_front() {
+			Some(req) => req,
+			None => continue
+		};
+		let complete = req.work.call_once((&mut http,));
+		*res.lock().unwrap() = Some(complete);
 	}
 }
 
 #[embassy_executor::task]
 pub async fn run_lcd(
-	mut communication_manager: Arc<Mutex<CommunicationManager<'static>>>,
+	http_config: Configuration,
 	spi: SpiDriver<'static>,
 	cs: AnyOutputPin<'static>,
 	dc: AnyOutputPin<'static>,
@@ -418,37 +413,29 @@ pub async fn run_lcd(
 	let mut display = InteractableDisplay::new(&spi, cs, dc, rst, enc_clk, enc_dt, enc_sw)
 		.unwrap_or_else(|err| panic!("Failed to create LCD ({err})"));
 
-	let f_cm = communication_manager.clone();
-	thread::spawn(move || http_request_fulfiller(f_cm));
+	let completed_request = Arc::new(Mutex::new(None));
+
+	let fulfiller_responses = completed_request.clone();
+	let fulfiller_requests = display.promises.clone();
+	thread::Builder::new()
+		.stack_size(8196)
+		.spawn(move || request_fulfiller(http_config, fulfiller_requests, fulfiller_responses)).unwrap();
 
 	// Create main page
-	let p_cm = communication_manager.clone();
-	let page = Unipage::try_new(theme, &mut display, p_cm, main_page).unwrap();
-	
+	let page = Unipage::try_new(theme, &mut display, main_page).unwrap();
 
 	display.push_page(page);
 
 	debug!("Starting LCD loop");
 	let mut last = Instant::now();
 	loop {
-		let d_cm = communication_manager.clone();
-		match select(
-			Timer::after_millis(5),
-			communication_manager.lock().unwrap().response_signal.wait()
-		)
-		.await
+		Timer::after_millis(5).await;
+
 		{
-			Either::Second((response, done)) => {
-				let page = Unipage::try_new(
-					theme,
-					&mut display,
-					d_cm,
-					|wf, theme, display, communication_manager| done(response, wf, theme, display)
-				)
-				.unwrap();
-				display.push_page(page);
+			let mut comp = completed_request.lock().unwrap();
+			if let Some(comp) = comp.take() {
+				comp.call_once((&mut display,))
 			}
-			_ => {}
 		}
 
 		lvgl::task_handler();
@@ -463,73 +450,11 @@ pub async fn run_lcd(
 }
 
 unsafe extern "C" fn encoder_read(_drv: *mut _lv_indev_drv_t, data: *mut lv_indev_data_t) {
-	let data = &mut *data;
+	unsafe {
+		let data = &mut *data;
 
-	data.enc_diff = ENCODER_STATE.diff;
-	ENCODER_STATE.diff = 0;
-	data.state = ENCODER_STATE.pressed;
+		data.enc_diff = ENCODER_STATE.diff;
+		ENCODER_STATE.diff = 0;
+		data.state = ENCODER_STATE.pressed;
+	}
 }
-
-/*pub fn chunked_draw_from_bitmap_reader<D: DrawTarget<Color = Rgb565>>(
-	display: &mut D,
-	mut reader: impl Read,
-	chunk_height: u32
-) -> std::io::Result<()> {
-	let header: [u8; 26] = reader.read_array()?;
-
-	let pixel_data_location = ((header[13] as u32) << 24)
-		| ((header[12] as u32) << 16)
-		| ((header[11] as u32) << 8)
-		| (header[10] as u32);
-
-	let image_width = ((header[21] as i32) << 24)
-		| ((header[20] as i32) << 16)
-		| ((header[19] as i32) << 8)
-		| (header[18] as i32);
-
-	let image_height = ((header[25] as i32) << 24)
-		| ((header[24] as i32) << 16)
-		| ((header[23] as i32) << 8)
-		| (header[22] as i32);
-
-	{
-		let mut sink = vec![0u8; (pixel_data_location - 26) as usize];
-		reader.read_exact(&mut sink)?;
-	}
-
-	let row_byte_length = 2 * image_width as u32;
-	let padded_row_byte_length = row_byte_length + (row_byte_length % 4);
-	let num_chunks = (image_height as u32).div_ceil(chunk_height);
-
-	for chunk_index in 1..=num_chunks {
-		let mut data_bytes: Vec<u8> = vec![0u8; (padded_row_byte_length * chunk_height) as usize];
-		reader.read(&mut data_bytes)?;
-
-		for i in row_byte_length..padded_row_byte_length {
-			data_bytes.remove(i as usize);
-		}
-
-		let chunk_bounds = Rectangle::new(
-			Point::new(
-				0,
-				(display.bounding_box().size.height - (chunk_height * chunk_index)) as i32
-			),
-			Size::new(display.bounding_box().size.width, chunk_height)
-		)
-		.intersection(&display.bounding_box());
-
-		display
-			.fill_contiguous(
-				&chunk_bounds,
-				data_bytes
-					.into_iter()
-					.take((padded_row_byte_length * chunk_bounds.size.height) as usize)
-					.array_chunks::<2>()
-					.map(|bytes| unsafe { transmute(((bytes[1] as u16) << 8) | (bytes[0] as u16)) })
-					.rev()
-			)
-			.unwrap_or_else(|_| panic!("Failed to draw image chunk"));
-	}
-
-	Ok(())
-}*/

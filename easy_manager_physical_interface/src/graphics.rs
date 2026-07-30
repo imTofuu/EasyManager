@@ -1,5 +1,4 @@
 use std::cell::UnsafeCell;
-use std::sync::{Arc, Mutex};
 
 use lvgl::font::Font;
 use lvgl::style::{FlexAlign, FlexFlow, Layout, Opacity, Style};
@@ -26,7 +25,6 @@ use lvgl::sys::{
 use lvgl::widgets::{Btn, Label, List, Switch};
 use lvgl::{Color, LvResult, NativeObject, Obj, Part, Screen, TextAlign, Widget};
 
-use crate::communications::CommunicationManager;
 use crate::lcd::InteractableDisplay;
 
 pub struct StyleCell {
@@ -63,7 +61,7 @@ impl RawStyleCell {
 	}
 
 	pub unsafe fn inner(&self) -> *mut lv_style_t {
-		self.inner.as_mut_unchecked() as *mut lv_style_t
+		unsafe { self.inner.as_mut_unchecked() as *mut lv_style_t }
 	}
 }
 
@@ -99,12 +97,10 @@ impl<'a> Unipage<'a> {
 	pub fn try_new<T: Theme>(
 		theme: &'static T,
 		display: &mut InteractableDisplay<'a>,
-		communication_manager: Arc<Mutex<CommunicationManager>>,
 		init: impl FnOnce(
 			WidgetFactory<Screen<'a>>,
 			&'static T,
-			&mut InteractableDisplay<'a>,
-			Arc<Mutex<CommunicationManager>>
+			&mut InteractableDisplay<'a>
 		) -> LvResult<()>
 	) -> LvResult<Self> {
 		let mut screen = Screen::blank()?;
@@ -114,7 +110,7 @@ impl<'a> Unipage<'a> {
 		unsafe { lv_group_set_default(group) };
 
 		let wf = WidgetFactory(&mut screen);
-		init(wf, theme, display, communication_manager)?;
+		init(wf, theme, display)?;
 
 		Ok(Self {
 			inner: screen,

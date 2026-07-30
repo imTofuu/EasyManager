@@ -2,7 +2,10 @@
   <dictionary name="project">
     <words>
       <w>Timesource</w>
+      <w>atqa</w>
+      <w>hdrs</w>
       <w>isready</w>
+      <w>reqa</w>
     </words>
   </dictionary>
 </component>

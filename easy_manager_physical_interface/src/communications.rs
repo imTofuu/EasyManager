@@ -4,15 +4,13 @@ use std::ffi::{CStr, CString, c_int, c_uchar};
 use std::ops::Range;
 use std::rc::Rc;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+
 use anyhow::Context;
-use cstr_core::cstr;
 use easy_manager_core::get_core_version;
-use easy_manager_core::packets::CLIENT_VERSION_HN;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::signal::Signal;
+use easy_manager_core::packets::{CLIENT_VERSION_HN, ErrorPacket, Packet};
 use embedded_svc::http::Method;
-use embedded_svc::http::client::{Client, Response};
+use embedded_svc::http::client::Client;
+use embedded_svc::io::Read;
 use embedded_svc::wifi::{AuthMethod, ClientConfiguration};
 use esp_idf_hal::gpio::OutputPin;
 use esp_idf_hal::io::asynch::Write;
@@ -30,104 +28,89 @@ use esp_idf_svc::http::client::EspHttpConnection;
 use esp_idf_svc::nvs::{EspNvs, NvsDefault};
 use esp_idf_svc::wifi::{AsyncWifi, Configuration as WifiConfiguration, EspWifi};
 use log::{debug, error, info, warn};
-use lvgl::widgets::Label;
-use lvgl::{LvResult, Screen};
 use mfrc522::comm::blocking::spi::{DummyDelay, SpiInterface};
 use mfrc522::{Error, Initialized, Mfrc522, MifareKey, Uid};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
-use crate::graphics::{Theme, Unipage, WidgetFactory};
 use crate::lcd::InteractableDisplay;
 use crate::uart_read_line;
 
-type RfidInner<'s, SPI, T> = Mfrc522<SpiInterface<SpiDeviceDriver<'s, SPI>, DummyDelay>, T>;
-
-pub struct CommunicationManager<'s> {
-	pub http:            Client<EspHttpConnection>,
-	pub rfid:            RfidReader<'s, &'s SpiDriver<'s>, fn(&Uid, u8) -> MifareKey>,
-	pub request_signal: Signal<
-		CriticalSectionRawMutex,
-		(
-			Method,
-			String,
-			Vec<(String, String)>,
-			Box<
-				dyn FnOnce(
-						Response<&mut EspHttpConnection>,
-						WidgetFactory<Screen>,
-						&'static dyn Theme,
-						&mut InteractableDisplay
-					) -> LvResult<()>
-					+ 'static
-			>
-		)
-	>,
-	pub response_signal: Signal<
-		CriticalSectionRawMutex,
-		(
-			Vec<u8>,
-			Box<
-				dyn FnOnce(
-						Vec<u8>,
-						WidgetFactory<Screen>,
-						&'static dyn Theme,
-						&mut InteractableDisplay
-					) -> LvResult<()>
-					+ 'static
-			>
-		)
+pub struct PagePromise {
+	pub work: Box<
+		dyn FnOnce(
+				&mut Client<EspHttpConnection>
+			) -> Box<dyn FnOnce(&mut InteractableDisplay) + Send>
+			+ Send
 	>
 }
 
-impl<'s> CommunicationManager<'s> {
-	pub fn new(
-		http: Client<EspHttpConnection>,
-		rfid: RfidReader<'s, &'s SpiDriver<'s>, fn(&Uid, u8) -> MifareKey>
-	) -> Self {
-		Self {
-			http,
-			rfid,
-			request_signal: Signal::new(),
-			response_signal: Signal::new()
-		}
-	}
-
-	pub fn make_http_request<'a>(
-		self: Arc<Mutex<Self>>,
+impl PagePromise {
+	pub fn new<B: Serialize + Send + 'static, R: Serialize + DeserializeOwned + Send + 'static>(
 		method: Method,
 		uri: String,
+		body: Option<B>,
 		mut headers: Vec<(String, String)>,
-		theme: &'static impl Theme,
-		display: &mut InteractableDisplay<'a>,
-		done: impl FnOnce(
-			Response<&mut EspHttpConnection>,
-			WidgetFactory<Screen>,
-			&'static dyn Theme,
-			&mut InteractableDisplay
-		) -> LvResult<()>
-		+ 'static
-	) -> anyhow::Result<()> {
-		let loading_page = Unipage::try_new(theme, display, self, Self::loading_page)?;
-		display.push_page(loading_page);
-		let hdrs = [(CLIENT_VERSION_HN.into(), get_core_version().into())];
-		headers.extend_from_slice(&hdrs);
-		self.request_signal
-			.signal((method, uri.into(), headers, Box::new(done)));
-		Ok(())
-	}
+		promise_closure: impl FnOnce(Packet<R>, &mut InteractableDisplay) + 'static + Send
+	) -> Self {
+		let complete = move |http: &mut Client<EspHttpConnection>| -> Box<dyn FnOnce(&mut InteractableDisplay) + Send> {
+			headers.extend_from_slice(&[(CLIENT_VERSION_HN.into(), get_core_version().into()), ("Content-Type".into(), "application/json".into())]);
+			let hdrs: Vec<_> = headers
+				.iter()
+				.map(|(k, v)| (k.as_str(), v.as_str()))
+				.collect();
+			let mut req = match http.request(method, uri.as_str(), hdrs.as_slice()) {
+				Ok(req) => req,
+				Err(err) => return Box::new(move |display| promise_closure(Packet::Error(ErrorPacket { message: format!("Error creating request: {err}") }), display))
+			};
+			
+			if let Some(body) = body {
+				let mut serializer = serde_json::Serializer::new(Vec::new());
+				if let Err(err) = body.serialize(&mut serializer) {
+					return Box::new(move |display| promise_closure(Packet::Error(ErrorPacket { message: format!("Failed to serialize request body: {err}") }), display));
+				}
+				let body_json = serializer.into_inner();
+				if let Err(err) = req.connection().write_all(body_json.as_slice()) {
+					return Box::new(move |display| promise_closure(Packet::Error(ErrorPacket { message: format!("Failed to write request body: {err}") }), display));
+				}
+			}
+			
+			let mut res = match req.submit() {
+				Ok(res) => res,
+				Err(err) => return Box::new(move |display| promise_closure(Packet::Error(ErrorPacket { message: format!("Error making request: {err}") }), display))
+			};
+			
+			
+			let buffer_size = match res.header("Content-Length") {
+				Some(buffer_size) => {
+					match usize::from_str(buffer_size) {
+						Ok(buffer_size) => buffer_size,
+						Err(err) => return Box::new(move |display| promise_closure(Packet::Error(ErrorPacket { message: format!("Error parsing Content-Length header: {err}") }), display))
+					}
+				}
+				None => return Box::new(move |display| promise_closure(Packet::Error(ErrorPacket { message: "Missing header: Content-Length".to_string() }), display))
+			};
+			
+			let mut buf = vec![0u8; buffer_size];
+			if let Err(err) = res.read_exact(buf.as_mut_slice()) {
+				return Box::new(move |display| promise_closure(Packet::Error(ErrorPacket { message: format!("Error reading response body: {err}") }), display))
+			}
 
-	fn loading_page(
-		mut wf: WidgetFactory<Screen>,
-		theme: &impl Theme,
-		_display: &mut InteractableDisplay,
-		_communication_manager: &mut CommunicationManager
-	) -> LvResult<()> {
-		let mut label = wf.create_widget(Label::create)?;
-		label.set_text_static(cstr!("loading"));
-		theme.primary_label(&mut label);
-
-		Ok(())
+			let packet: R = match serde_json::from_slice(buf.as_slice()) {
+				Ok(packet) => packet,
+				Err(err) => return Box::new(move |display| promise_closure(Packet::Error(ErrorPacket { message: format!("Failed to parse packet: {err}") }), display))
+			};
+			Box::new(move |display| {
+				promise_closure(Packet::Ok(packet), display);
+			})
+		};
+		Self {
+			work: Box::new(complete)
+		}
 	}
 }
+
+type RfidInner<'s, SPI, T> = Mfrc522<SpiInterface<SpiDeviceDriver<'s, SPI>, DummyDelay>, T>;
 
 pub struct RfidReader<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> MifareKey> {
 	inner:  RfidInner<'s, SPI, Initialized>,
