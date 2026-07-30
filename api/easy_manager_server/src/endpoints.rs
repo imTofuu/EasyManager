@@ -9,7 +9,7 @@ use axum::{Extension, Json};
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use easy_manager_core::packets::get::GetUserInfoResponse;
-use easy_manager_core::packets::post::{CreateItemModelRequest, CreateUserRequest, LoginRequest};
+use easy_manager_core::packets::post::{CreateItemModelRequest, CreateUserRequest, LoginRequest, LoginResponse};
 use easy_manager_core::packets::{ErrorPacket, Packet};
 use easy_manager_core::{AccountIdentifier, PermissionLevel};
 use migration::Expr;
@@ -263,7 +263,7 @@ pub async fn login(
 	state: State<DatabaseConnection>,
 	cookie_jar: CookieJar,
 	Json(login_request): Json<LoginRequest>
-) -> (StatusCode, CookieJar, ResponsePacket<()>) {
+) -> (StatusCode, CookieJar, ResponsePacket<LoginResponse>) {
 	let mut user_found = true;
 
 	let user: user::Model = match User::find()
@@ -382,16 +382,18 @@ pub async fn login(
 			);
 		}
 	};
+	
+	let session_id = insert.last_insert_id;
 
 	let cookie_jar = cookie_jar.add(
-		Cookie::build(("session", insert.last_insert_id.to_string()))
+		Cookie::build(("session", session_id.to_string()))
 			.path("/")
 			.http_only(true)
 			.secure(std::env::var("IS_DEV").map(|_| false).unwrap_or(true))
 			.same_site(SameSite::Lax)
 	);
 
-	(StatusCode::CREATED, cookie_jar, Packet::Ok(()).into())
+	(StatusCode::CREATED, cookie_jar, Packet::Ok(LoginResponse { session_id: session_id.to_string() }).into())
 }
 
 #[tracing::instrument]
