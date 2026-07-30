@@ -6,6 +6,7 @@
 #![feature(push_mut)]
 #![feature(ptr_as_ref_unchecked)]
 #![warn(clippy::unwrap_used)]
+#![allow(clippy::mutex)]
 
 mod communications;
 mod graphics;
@@ -93,14 +94,17 @@ async fn main(spawner: Spawner) {
 	let timer_service = EspTaskTimerService::new()
 		.unwrap_or_else(|err| panic!("Failed to create task timer service ({err})"));
 
-	let mut led_channel_config = TxChannelConfig::default();
-	led_channel_config.resolution = Hertz(10_000_000);
-	led_channel_config.memory_access = MemoryAccess::Indirect {
-		memory_block_symbols: 64
+	let led_channel_config = TxChannelConfig {
+		resolution: Hertz(10_000_000),
+		memory_access: MemoryAccess::Indirect {
+			memory_block_symbols: 64
+		},
+		..Default::default()
 	};
 
 	let mut led_driver =
-		Ws2812Rmt::new_with_channel_config(peripherals.pins.gpio25, led_channel_config).unwrap();
+		Ws2812Rmt::new_with_channel_config(peripherals.pins.gpio25, led_channel_config)
+			.expect("Failed to create LED driver");
 	led_driver
 		.set_pixel(RGB8::new(0 /* green */, 255, 0))
 		.unwrap();

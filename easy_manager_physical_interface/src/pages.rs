@@ -4,7 +4,7 @@ use easy_manager_core::packets::Packet;
 use easy_manager_core::packets::post::{LoginRequest, LoginResponse};
 use embedded_svc::http::Method;
 use esp_idf_sys::esp_restart;
-use log::warn;
+use log::error;
 use lvgl::widgets::{Btn, Dropdown, Label, List, Switch};
 use lvgl::{Align, Event, LvResult, Obj, Screen, Widget};
 
@@ -38,16 +38,14 @@ pub fn main_page<'a>(
 		})?;
 		borrow_button.set_width(percent(100));
 		theme.primary_button(&mut borrow_button);
-		let mut new_page_result: LvResult<()> = Ok(());
 		borrow_button.on_event(|_, e| {
 			if let Event::Clicked = e {
 				match Unipage::try_new(theme, display, borrow_page) {
 					Ok(page) => display.push_page(page),
-					Err(err) => new_page_result = Err(err)
+					Err(err) => error!("Something went wrong creating the borrowing page ({err})")
 				}
 			}
 		})?;
-		new_page_result?;
 
 		let mut return_button = wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
 			let mut label = wf.create_widget(Label::create)?;
@@ -67,16 +65,14 @@ pub fn main_page<'a>(
 			})?;
 		program_button.set_width(percent(100));
 		theme.secondary_button(&mut program_button);
-		let mut new_page_result: LvResult<()> = Ok(());
 		program_button.on_event(|_, e| {
 			if let Event::Clicked = e {
 				match Unipage::try_new(theme, display, program_page) {
 					Ok(page) => display.push_page(page),
-					Err(err) => new_page_result = Err(err)
+					Err(err) => error!("Something went wrong creating the programming page ({err})")
 				}
 			}
 		})?;
-		new_page_result?;
 
 		let mut settings_button =
 			wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
@@ -230,12 +226,11 @@ fn program_page<'a>(
 									);
 									match page {
 										Ok(page) => display.push_page(page),
-										Err(err) => todo!()
+										Err(err) => error!("Error creating test page ({err})")
 									}
 								}
 								Packet::Error(err) => {
-									warn!("{}", err.message);
-									todo!()
+									error!("Error getting login response ({})", err.message);
 								}
 							}
 						}
@@ -261,7 +256,11 @@ fn test<'a>(
 	_display: &mut InteractableDisplay<'a>
 ) -> LvResult<()> {
 	let mut label = wf.create_widget(Label::create)?;
-	label.set_text(CString::new(packet.session_id).unwrap().as_c_str());
+	label.set_text(
+		CString::new(packet.session_id)
+			.unwrap_or(cstr!("Invalid session id").into())
+			.as_c_str()
+	);
 	theme.primary_label(&mut label);
 
 	Ok(())

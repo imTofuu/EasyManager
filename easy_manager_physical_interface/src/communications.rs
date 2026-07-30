@@ -36,9 +36,9 @@ use serde::de::DeserializeOwned;
 use crate::lcd::InteractableDisplay;
 use crate::uart_read_line;
 
-pub type HttpWork =
-	dyn FnOnce(&mut Client<EspHttpConnection>) -> Result<Vec<u8>, ErrorPacket> + Send;
-pub type HttpPromiseClosure = dyn FnOnce(Result<Vec<u8>, ErrorPacket>, &mut InteractableDisplay);
+pub type HttpWorkResult = Result<Vec<u8>, ErrorPacket>;
+pub type HttpWork = dyn FnOnce(&mut Client<EspHttpConnection>) -> HttpWorkResult + Send;
+pub type HttpPromiseClosure = dyn FnOnce(HttpWorkResult, &mut InteractableDisplay);
 
 pub struct HttpPromise {
 	pub work: Box<HttpWork>,
@@ -55,7 +55,7 @@ impl HttpPromise {
 	) -> Self {
 		Self {
 			work: Box::new(
-				move |http: &mut Client<EspHttpConnection>| -> Result<Vec<u8>, ErrorPacket> {
+				move |http: &mut Client<EspHttpConnection>| -> HttpWorkResult {
 					headers.extend_from_slice(&[
 						(CLIENT_VERSION_HN.into(), get_core_version().into()),
 						("Content-Type".into(), "application/json".into())
@@ -164,8 +164,10 @@ pub struct RfidReader<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> Mi
 
 impl<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> MifareKey> RfidReader<'s, SPI, K> {
 	pub fn new(spi: SPI, cs: Option<impl OutputPin + 's>, key_cb: K) -> anyhow::Result<Self> {
-		let mut rfid_reader_spi_config = esp_idf_hal::spi::config::Config::default();
-		rfid_reader_spi_config.baudrate = Hertz(1_000_000);
+		let rfid_reader_spi_config = esp_idf_hal::spi::config::Config {
+			baudrate: Hertz(1_000_000),
+			..Default::default()
+		};
 		let rfid_reader_device = SpiDeviceDriver::new(spi, cs, &rfid_reader_spi_config)
 			.context("failed to create RFID reader SPI device")?;
 		let rfid_interface = SpiInterface::new(rfid_reader_device);

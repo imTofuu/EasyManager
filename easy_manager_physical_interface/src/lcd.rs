@@ -66,7 +66,7 @@ use lvgl::sys::{
 };
 use lvgl::{Display, DrawBuffer};
 
-use crate::communications::{HttpPromise, HttpWork};
+use crate::communications::{HttpPromise, HttpWork, HttpWorkResult};
 use crate::graphics::{ModernTheme, Unipage};
 use crate::pages::main_page;
 
@@ -85,6 +85,7 @@ impl<'d, MODE> OutputPin for SPIPinDriver<'d, MODE> {}
 pub struct DummyTimesource();
 
 impl TimeSource for DummyTimesource {
+	#[allow(clippy::unwrap_used)]
 	fn get_timestamp(&self) -> Timestamp { Timestamp::from_calendar(1970, 1, 1, 0, 0, 0).unwrap() }
 }
 
@@ -376,7 +377,7 @@ impl<'a> InteractableDisplay<'a> {
 fn request_fulfiller(
 	http_config: Configuration,
 	req: Arc<Mutex<Option<Box<HttpWork>>>>,
-	res: Arc<Mutex<Option<Result<Vec<u8>, ErrorPacket>>>>
+	res: Arc<Mutex<Option<HttpWorkResult>>>
 ) {
 	let mut http =
 		Client::wrap(EspHttpConnection::new(&http_config).expect("Failed to create HTTP client"));
@@ -422,10 +423,11 @@ pub async fn run_lcd(
 	thread::Builder::new()
 		.stack_size(8196)
 		.spawn(move || request_fulfiller(http_config, fulfiller_request, fulfiller_response))
-		.unwrap();
+		.expect("Failed to create HTTP request fulfiller thread");
 
 	// Create main page
-	let page = Unipage::try_new(theme, &mut display, main_page).unwrap();
+	let page =
+		Unipage::try_new(theme, &mut display, main_page).expect("Failed to create main page");
 
 	display.push_page(page);
 
@@ -458,8 +460,12 @@ pub async fn run_lcd(
 
 		lvgl::task_handler();
 
-		display.enc_clk.enable_interrupt().unwrap();
-		display.enc_sw.enable_interrupt().unwrap();
+		if let Err(err) = display.enc_clk.enable_interrupt() {
+			error!("Failed to enable encoder CLK interrupt ({err})");
+		}
+		if let Err(err) = display.enc_sw.enable_interrupt() {
+			error!("Failed to enable encoder button interrupt ({err})");
+		}
 
 		let now = Instant::now();
 		lvgl::tick_inc(now - last);
