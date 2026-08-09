@@ -32,13 +32,13 @@ impl From<PermissionLevel> for String {
 }
 
 impl TryFrom<String> for PermissionLevel {
-	type Error = ();
+	type Error = String;
 
 	fn try_from(value: String) -> Result<Self, Self::Error> {
 		match value.as_str() {
 			"admin" => Ok(Self::Admin),
 			"default" => Ok(Self::Default),
-			_ => Err(())
+			_ => Err("invalid permission level".to_owned())
 		}
 	}
 }

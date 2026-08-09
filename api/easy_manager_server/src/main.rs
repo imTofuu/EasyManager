@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{Request, Response, StatusCode};
+use axum::http::{Request, Response, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::routing::method_routing;
@@ -273,13 +273,19 @@ async fn main() -> Result<(), EasyManagerError> {
 			"/user/{user_id}",
 			method_routing::get(endpoints::get_public_user_info)
 		)
+		.route("/users", method_routing::get(endpoints::get_users))
 		.route("/login", method_routing::post(endpoints::login))
 		.route("/logout", method_routing::post(endpoints::logout))
 		.with_state(db_connection.clone());
 
 	let main_router = auth_router
 		.merge(unauth_router)
-		.layer(middleware::from_fn(packet_validation_middleware));
+		.layer(middleware::from_fn(packet_validation_middleware))
+		.fallback(async |uri: Uri| -> (StatusCode, ResponsePacket<()>) {
+			(StatusCode::NOT_FOUND, Packet::Error(ErrorPacket {
+				message: format!("Route not found for {uri}")
+			}).into())
+		});
 
 	// Open port 3000
 	let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")

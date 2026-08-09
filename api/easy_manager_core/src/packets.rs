@@ -35,6 +35,7 @@ pub enum Packet<T: serde::Serialize> {
 }
 
 pub mod get {
+	use alloc::boxed::Box;
 	use alloc::string::String;
 
 	use crate::PermissionLevel;
@@ -43,6 +44,11 @@ pub mod get {
 	pub struct GetUserInfoResponse {
 		pub username:         String,
 		pub permission_level: PermissionLevel
+	}
+
+	#[derive(serde::Serialize, serde::Deserialize)]
+	pub struct GetUsersResponse {
+		pub users: Box<[GetUserInfoResponse]>
 	}
 }
 

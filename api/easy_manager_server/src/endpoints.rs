@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use axum::{Extension, Json};
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::{Cookie, SameSite};
-use easy_manager_core::packets::get::GetUserInfoResponse;
+use easy_manager_core::packets::get::{GetUserInfoResponse, GetUsersResponse};
 use easy_manager_core::packets::post::{
 	CreateItemModelRequest,
 	CreateUserRequest,
@@ -75,8 +75,8 @@ pub async fn get_public_user_info(
 
 	let permission_level = match user.permission_level.try_into() {
 		Ok(permission_level) => permission_level,
-		Err(()) => {
-			tracing::error!("Permission level of user is malformed");
+		Err(err) => {
+			tracing::error!(%err, "Permission level of user is malformed");
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
 				Packet::Error(ErrorPacket {
@@ -94,6 +94,54 @@ pub async fn get_public_user_info(
 			permission_level
 		})
 		.into()
+	)
+}
+
+//todo make this not public
+#[tracing::instrument]
+pub async fn get_users(
+	state: State<DatabaseConnection>
+) -> (StatusCode, ResponsePacket<GetUsersResponse>) {
+	let users = match User::find().all(&state.0).await {
+		Ok(ok) => ok,
+		Err(err) => {
+			tracing::error!(%err, "Failed to get all users from database");
+			return (
+				StatusCode::INTERNAL_SERVER_ERROR,
+				Packet::Error(ErrorPacket {
+					message: "Something went wrong".to_owned()
+				})
+				.into()
+			);
+		}
+	};
+
+	let users: Box<[GetUserInfoResponse]> = match users
+		.into_iter()
+		.map(|user| {
+			Ok::<GetUserInfoResponse, String>(GetUserInfoResponse {
+				username:         user.username,
+				permission_level: user.permission_level.try_into()?
+			})
+		})
+		.collect()
+	{
+		Ok(slice) => slice,
+		Err(err) => {
+			tracing::error!(%err, "Failed to collect all users");
+			return (
+				StatusCode::INTERNAL_SERVER_ERROR,
+				Packet::Error(ErrorPacket {
+					message: "Something went wrong".to_owned()
+				})
+				.into()
+			);
+		}
+	};
+
+	(
+		StatusCode::OK,
+		Packet::Ok(GetUsersResponse { users }).into()
 	)
 }
 
