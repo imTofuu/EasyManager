@@ -155,6 +155,53 @@ impl HttpPromise {
 	}
 }
 
+pub type RfidReadResult = Result<Option<Vec<[u8; 16]>>, Error<SpiError>>;
+pub type RfidReadPromise =
+	Box<dyn FnOnce(Result<Vec<[u8; 16]>, Error<SpiError>>, &mut InteractableDisplay) + 'static>;
+
+pub type RfidWriteResult = Result<bool, Error<SpiError>>;
+pub type RfidWritePromise =
+	Box<dyn FnOnce(Result<(), Error<SpiError>>, &mut InteractableDisplay) + 'static>;
+
+pub enum RfidPromise {
+	Read(
+		Box<
+			dyn for<'a> Fn(
+				&mut RfidReader<'a, SpiDriver<'a>, Box<dyn Fn(&Uid, u8) -> MifareKey>>
+			) -> RfidReadResult
+		>,
+		RfidReadPromise
+	),
+	Write(
+		Box<
+			dyn for<'a> Fn(
+				&mut RfidReader<'a, SpiDriver<'a>, Box<dyn Fn(&Uid, u8) -> MifareKey>>
+			) -> RfidWriteResult
+		>,
+		RfidWritePromise
+	)
+}
+
+impl RfidPromise {
+	pub fn read<'a>(blocks: Range<u8>, promise_closure: RfidReadPromise) -> Self {
+		Self::Read(
+			Box::new(move |rfid| rfid.reqa_collect_data(blocks.clone())),
+			promise_closure
+		)
+	}
+
+	pub fn write(
+		data: Vec<(u8, [u8; 16])>,
+		default: bool,
+		promise_closure: RfidWritePromise
+	) -> Self {
+		Self::Write(
+			Box::new(move |rfid| rfid.reqa_write_data(data.clone(), default)),
+			promise_closure
+		)
+	}
+}
+
 type RfidInner<'s, SPI, T> = Mfrc522<SpiInterface<SpiDeviceDriver<'s, SPI>, DummyDelay>, T>;
 
 pub struct RfidReader<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> MifareKey> {
@@ -181,7 +228,7 @@ impl<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> MifareKey> RfidRead
 	pub fn reqa_collect_data(
 		&mut self,
 		blocks: Range<u8>
-	) -> Result<Option<Vec<u8>>, Error<SpiError>> {
+	) -> Result<Option<Vec<[u8; 16]>>, Error<SpiError>> {
 		let mut out = Vec::new();
 		let atqa = match self.inner.reqa() {
 			Ok(atqa) => atqa,
@@ -191,17 +238,18 @@ impl<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> MifareKey> RfidRead
 		let uid = self.inner.select(&atqa)?;
 		for block in blocks {
 			self.inner
-				.mf_authenticate(&uid, block, &self.key_cb.call((&uid, block)))?;
+				.mf_authenticate(&uid, block, &self.get_auth_for_block(&uid, block))?;
 			out.push(self.inner.mf_read(block)?);
 		}
 		self.inner.hlta()?;
 		self.inner.stop_crypto1()?;
-		Ok(Some(out.concat()))
+		Ok(Some(out))
 	}
 
 	pub fn reqa_write_data(
 		&mut self,
-		data: impl IntoIterator<Item = (u8, [u8; 16])>
+		data: impl IntoIterator<Item = (u8, [u8; 16])> + Clone,
+		default: bool
 	) -> Result<bool, Error<SpiError>> {
 		let atqa = match self.inner.reqa() {
 			Ok(atqa) => atqa,
@@ -209,9 +257,34 @@ impl<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> MifareKey> RfidRead
 			Err(err) => return Err(err)
 		};
 		let uid = self.inner.select(&atqa)?;
+
+		let mut written_key_sectors = Vec::new();
+
 		for (block, data) in data {
+			if block % 4 == 3 {
+				todo!("trying to write to trailer block. error not yet implemented")
+			}
+
+			if default {
+				let sector = block / 4;
+				if !written_key_sectors.contains(&sector) {
+					let trailer_block = block + (3 - (block % 4));
+
+					self.inner
+						.mf_authenticate(&uid, trailer_block, &[0xff; 6])?;
+
+					let mut new_key = self.inner.mf_read(trailer_block)?;
+					new_key[..6].copy_from_slice(&self.get_auth_for_block(&uid, block));
+					while self.inner.mf_read(trailer_block)? != new_key {
+						self.inner.mf_write(trailer_block, new_key)?;
+					}
+					written_key_sectors.push(sector);
+				}
+			}
+
 			self.inner
-				.mf_authenticate(&uid, block, &self.key_cb.call((&uid, block)))?;
+				.mf_authenticate(&uid, block, &self.get_auth_for_block(&uid, block))?;
+			
 			while self.inner.mf_read(block)? != data {
 				self.inner.mf_write(block, data)?;
 			}
@@ -219,6 +292,10 @@ impl<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> MifareKey> RfidRead
 		self.inner.hlta()?;
 		self.inner.stop_crypto1()?;
 		Ok(true)
+	}
+
+	fn get_auth_for_block(&self, uid: &Uid, block: u8) -> MifareKey {
+		self.key_cb.call((uid, block / 4))
 	}
 }
 

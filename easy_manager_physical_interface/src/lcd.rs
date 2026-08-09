@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::ffi::{c_int, c_void};
 use std::io::Read;
+use std::mem::transmute;
 use std::sync::atomic::{AtomicI16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -9,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use arrayvec::ArrayVec;
-use easy_manager_core::packets::ErrorPacket;
 use embassy_time::Timer;
 use embedded_sdmmc::{BlockDevice, File, TimeSource, Timestamp};
 use embedded_svc::http::client::Client;
@@ -65,8 +65,9 @@ use lvgl::sys::{
 	lv_indev_t
 };
 use lvgl::{Display, DrawBuffer};
+use mfrc522::{MifareKey, Uid};
 
-use crate::communications::{HttpPromise, HttpWork, HttpWorkResult};
+use crate::communications::{HttpPromise, HttpWork, HttpWorkResult, RfidPromise, RfidReader};
 use crate::graphics::{ModernTheme, Unipage};
 use crate::pages::main_page;
 
@@ -129,12 +130,13 @@ pub enum ImageDrawError {
 	DrawError()
 }
 
-pub struct InteractableDisplay<'a> {
+pub struct InteractableDisplay {
 	display:    Display,
-	page_stack: ArrayVec<Box<Unipage<'a>>, 64>,
+	page_stack: ArrayVec<Box<Unipage<'static>>, 64>,
 	indev:      *mut lv_indev_t,
 
-	promises: VecDeque<HttpPromise>,
+	http_promises: VecDeque<HttpPromise>,
+	rfid_promise:  Option<RfidPromise>,
 
 	enc_clk: PinDriver<'static, Input>,
 	enc_sw:  PinDriver<'static, Input>
@@ -150,7 +152,7 @@ static mut ENCODER_STATE: EncoderState = EncoderState {
 	pressed: lv_indev_state_t_LV_INDEV_STATE_RELEASED
 };
 
-impl<'a> InteractableDisplay<'a> {
+impl InteractableDisplay {
 	pub fn new(
 		spi: &SpiDriver,
 		cs: impl OutputPin,
@@ -324,53 +326,60 @@ impl<'a> InteractableDisplay<'a> {
 		}
 
 		Ok(Self {
-			display:    lvgl_display,
-			page_stack: ArrayVec::new(),
-			promises:   VecDeque::new(),
-			indev:      encoder_ptr,
-			enc_clk:    clk,
-			enc_sw:     sw
+			display:       lvgl_display,
+			page_stack:    ArrayVec::new(),
+			http_promises: VecDeque::new(),
+			rfid_promise:  None,
+			indev:         encoder_ptr,
+			enc_clk:       clk,
+			enc_sw:        sw
 		})
 	}
 
-	pub fn add_promise(&mut self, page_promise: HttpPromise) {
-		self.promises.push_back(page_promise);
+	pub fn add_http_promise(&mut self, promise: HttpPromise) {
+		self.http_promises.push_back(promise);
 	}
 
-	pub fn push_page(&mut self, page: Unipage<'a>) {
-		// todo fix this panic
-		self.page_stack.push(Box::new(page));
+	pub fn set_rfid_promise(&mut self, promise: Option<RfidPromise>) -> Option<RfidPromise> {
+		let old = self.rfid_promise.take();
+		self.rfid_promise = promise;
+		old
+	}
 
-		// As long as the top page isn't popped without moving the active screen down
-		// first i think this should be fine
+	pub fn push_page(&mut self, page: Unipage) {
+		// todo fix this panic
+		// Erases the lifetime parameter of the page because the children shouldn't get
+		// dropped until the page is dropped as long as lv_obj_del is never manually
+		// called
+		self.page_stack.push(Box::new(unsafe { transmute(page) }));
+
+		// As long as the active screen is changed before this is popped it should be
+		// fine
 		let new_top_screen = unsafe {
 			self.page_stack
 				.as_mut_ptr()
 				.add(self.page_stack.len() - 1)
-				.as_mut()
-				.expect("Page stack pointer is null")
+				.as_mut_unchecked()
 		};
 
 		new_top_screen.make_group_active(self.indev);
 		self.display.set_scr_act(new_top_screen.screen());
 	}
 
-	pub fn pop_page(&mut self) -> Option<Unipage<'a>> {
+	pub fn pop_page<'a>(&mut self) -> Option<Box<Unipage<'a>>> {
 		assert_ne!(self.page_stack.len(), 1, "Attempting to pop main screen");
 
 		let new_top_screen = unsafe {
 			self.page_stack
 				.as_mut_ptr()
 				.add(self.page_stack.len() - 2)
-				.as_mut()
-				.expect("Page stack pointer is null")
+				.as_mut_unchecked()
 		};
 
 		new_top_screen.make_group_active(self.indev);
 		self.display.set_scr_act(new_top_screen.screen());
 
-		let old_top_screen = self.page_stack.pop();
-		old_top_screen.map(|page| *page)
+		self.page_stack.pop()
 	}
 }
 
@@ -398,8 +407,10 @@ fn request_fulfiller(
 #[embassy_executor::task]
 pub async fn run_lcd(
 	http_config: Configuration,
-	spi: SpiDriver<'static>,
-	cs: AnyOutputPin<'static>,
+	rfid_spi: SpiDriver<'static>,
+	rfid_cs: AnyOutputPin<'static>,
+	lcd_spi: SpiDriver<'static>,
+	lcd_cs: AnyOutputPin<'static>,
 	dc: AnyOutputPin<'static>,
 	rst: AnyOutputPin<'static>,
 	enc_clk: AnyInputPin<'static>,
@@ -411,8 +422,10 @@ pub async fn run_lcd(
 
 	let theme = Box::leak(Box::new(ModernTheme::new()));
 
-	let mut display = InteractableDisplay::new(&spi, cs, dc, rst, enc_clk, enc_dt, enc_sw)
-		.unwrap_or_else(|err| panic!("Failed to create LCD ({err})"));
+	let mut display = Box::leak(Box::new(
+		InteractableDisplay::new(&lcd_spi, lcd_cs, dc, rst, enc_clk, enc_dt, enc_sw)
+			.unwrap_or_else(|err| panic!("Failed to create LCD ({err})"))
+	));
 
 	let mut current_request_done = None;
 	let http_request = Arc::new(Mutex::new(None));
@@ -425,9 +438,11 @@ pub async fn run_lcd(
 		.spawn(move || request_fulfiller(http_config, fulfiller_request, fulfiller_response))
 		.expect("Failed to create HTTP request fulfiller thread");
 
+	let key_cb: Box<dyn Fn(&Uid, u8) -> MifareKey> = Box::new(|_uid, _block| [0xffu8; 6]);
+	let mut rfid = RfidReader::new(rfid_spi, Some(rfid_cs), key_cb).unwrap();
+
 	// Create main page
-	let page =
-		Unipage::try_new(theme, &mut display, main_page).expect("Failed to create main page");
+	let page = Unipage::try_new(theme, display, main_page).expect("Failed to create main page");
 
 	display.push_page(page);
 
@@ -436,8 +451,43 @@ pub async fn run_lcd(
 	loop {
 		Timer::after_millis(5).await;
 
+		let mut rfid_data = None;
+		let mut rfid_wrote = Ok(false);
+
+		match &display.rfid_promise {
+			Some(RfidPromise::Read(work, _)) => {
+				if let Some(data) = work.call((&mut rfid,)).transpose() {
+					rfid_data = Some(data)
+				}
+			}
+			Some(RfidPromise::Write(work, _)) => {
+				rfid_wrote = work.call((&mut rfid,));
+			}
+			None => {}
+		}
+
+		if let Some(data) = rfid_data {
+			match display.rfid_promise.take() {
+				Some(RfidPromise::Read(_, promise)) => promise.call_once((data, &mut display)),
+				None | Some(RfidPromise::Write(..)) => {
+					error!("Invalid promise to run");
+				}
+			}
+		}
+
+		if let result @ Ok(true) | result @ Err(_) = rfid_wrote {
+			match display.rfid_promise.take() {
+				Some(RfidPromise::Write(_, promise)) => {
+					promise.call_once((result.map(|_| ()), &mut display))
+				}
+				None | Some(RfidPromise::Read(..)) => {
+					error!("Invalid promise to run");
+				}
+			}
+		}
+
 		if current_request_done.is_none() {
-			if let Some(HttpPromise { work, done }) = display.promises.pop_front() {
+			if let Some(HttpPromise { work, done }) = display.http_promises.pop_front() {
 				current_request_done = Some(done);
 				*http_request.lock().unwrap() = Some(work);
 			}
@@ -448,7 +498,7 @@ pub async fn run_lcd(
 				*http_request.lock().unwrap() = None;
 				match current_request_done.take() {
 					Some(promise) => {
-						promise.call_once((res, &mut display));
+						promise.call_once((res, display));
 					}
 					None => {
 						error!("HTTP response with no request");

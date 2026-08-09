@@ -1,5 +1,10 @@
 use std::cell::UnsafeCell;
+use std::ops::Range;
 
+use easy_manager_core::packets::Packet;
+use embedded_svc::http::Method;
+use esp_idf_hal::spi::SpiError;
+use log::{error};
 use lvgl::font::Font;
 use lvgl::style::{FlexAlign, FlexFlow, Layout, Opacity, Style};
 use lvgl::sys::{
@@ -24,7 +29,11 @@ use lvgl::sys::{
 };
 use lvgl::widgets::{Btn, Label, List, Switch};
 use lvgl::{Color, LvResult, NativeObject, Obj, Part, Screen, TextAlign, Widget};
+use mfrc522::Error;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
+use crate::communications::{HttpPromise, RfidPromise};
 use crate::lcd::InteractableDisplay;
 
 pub struct StyleCell {
@@ -96,11 +105,11 @@ impl<'a> Unipage<'a> {
 	/// It is UB to drop the Unipage instance from init
 	pub fn try_new<T: Theme>(
 		theme: &'static T,
-		display: &mut InteractableDisplay<'a>,
+		display: &mut InteractableDisplay,
 		init: impl FnOnce(
 			WidgetFactory<Screen<'a>>,
 			&'static T,
-			&mut InteractableDisplay<'a>
+			&mut InteractableDisplay
 		) -> LvResult<()>
 	) -> LvResult<Self> {
 		let mut screen = Screen::blank()?;
@@ -118,6 +127,119 @@ impl<'a> Unipage<'a> {
 		})
 	}
 
+	// THIS AUTOMATICALLY PUSHES THE PAGE; i will change it at some point
+	pub fn try_new_with_http<
+		T: Theme,
+		B: Serialize + Send + 'static,
+		R: Serialize + DeserializeOwned + Send + 'static
+	>(
+		method: Method,
+		uri: String,
+		body: Option<B>,
+		headers: Vec<(String, String)>,
+		theme: &'static T,
+		display: &mut InteractableDisplay,
+		init: impl FnOnce(
+			Packet<R>,
+			WidgetFactory<Screen>,
+			&'static T,
+			&mut InteractableDisplay
+		) -> LvResult<()>
+		+ 'static
+	) -> LvResult<()> {
+		let promise = HttpPromise::new(
+			method,
+			uri,
+			body,
+			headers,
+			move |packet: Packet<R>, closure_display| {
+				let page = match Self::try_new(theme, closure_display, |wf, thm, inner_display| {
+					init(packet, wf, thm, inner_display)?;
+					Ok(())
+				}) {
+					Ok(page) => page,
+					Err(err) => {
+						error!("Failed to create page with HTTP request ({err})");
+						return;
+					}
+				};
+				// todo loading screen
+				closure_display.push_page(page);
+			}
+		);
+		display.add_http_promise(promise);
+		Ok(())
+	}
+
+	// THIS AUTOMATICALLY PUSHES THE PAGE; i will change it at some point
+	pub fn try_new_with_rfid_read<T: Theme>(
+		blocks: Range<u8>,
+		theme: &'static T,
+		display: &mut InteractableDisplay,
+		init: impl FnOnce(
+			Result<Vec<[u8; 16]>, Error<SpiError>>,
+			WidgetFactory<Screen>,
+			&'static T,
+			&mut InteractableDisplay
+		) -> LvResult<()>
+		+ 'static
+	) -> LvResult<()> {
+		let promise = RfidPromise::read(
+			blocks,
+			Box::new(move |data, display| {
+				let page = match Self::try_new(theme, display, |wf, theme, display| {
+					init(data, wf, theme, display)?;
+					Ok(())
+				}) {
+					Ok(page) => page,
+					Err(err) => {
+						error!("Failed to create page with RFID read request ({err})");
+						return;
+					}
+				};
+				display.push_page(page);
+			})
+		);
+		display.set_rfid_promise(Some(promise));
+		Ok(())
+	}
+
+	pub fn try_new_with_rfid_write<T: Theme>(
+		data: Vec<(u8, [u8; 16])>,
+		default: bool,
+		theme: &'static T,
+		display: &mut InteractableDisplay,
+		init: impl FnOnce(
+			Result<(), Error<SpiError>>,
+			WidgetFactory<Screen>,
+			&'static T,
+			&mut InteractableDisplay
+		) -> LvResult<()>
+		+ 'static
+	) -> LvResult<()> {
+		let promise = RfidPromise::write(
+			data,
+			default,
+			Box::new(move |result, display| {
+				let page = match Self::try_new(theme, display, |wf, theme, display| {
+					init(result, wf, theme, display)?;
+					Ok(())
+				}) {
+					Ok(page) => page,
+					Err(err) => {
+						error!("Failed to create page with RFID write request ({err})");
+						return;
+					}
+				};
+				display.push_page(page);
+			})
+		);
+		display.set_rfid_promise(Some(promise));
+		Ok(())
+	}
+
+	// Shouldn't be called normally, will be removed at some point
+	#[deprecated]
 	pub fn screen(&mut self) -> &'a mut Screen<'_> { &mut self.inner }
 	pub fn make_group_active(&self, indev: *mut lv_indev_t) {
 		unsafe { lv_indev_set_group(indev, self.group) }
@@ -137,7 +259,6 @@ impl<'a> Drop for Unipage<'a> {
 }
 
 pub trait Theme {
-	// Swap blue and red when making colours
 	fn dominant(&self) -> Color;
 	fn secondary(&self) -> Color;
 	fn accent(&self) -> Color;

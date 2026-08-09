@@ -1,23 +1,26 @@
-use cstr_core::{CString, cstr};
-use easy_manager_core::AccountIdentifier;
-use easy_manager_core::packets::Packet;
-use easy_manager_core::packets::post::{LoginRequest, LoginResponse};
-use embedded_svc::http::Method;
-use esp_idf_sys::esp_restart;
-use log::error;
-use lvgl::widgets::{Btn, Dropdown, Label, List, Switch};
-use lvgl::{Align, Event, LvResult, Obj, Screen, Widget};
+use std::cell::Cell;
+use std::rc::Rc;
 
-use crate::communications::HttpPromise;
+use cstr_core::{CString, cstr};
+use easy_manager_core::packets::Packet;
+use easy_manager_core::packets::post::{LoginResponse};
+use esp_idf_hal::spi::SpiError;
+use esp_idf_sys::esp_restart;
+use log::{error, info};
+use lvgl::sys::{LV_STATE_CHECKED, lv_obj_has_state, lv_state_t};
+use lvgl::widgets::{Btn, Dropdown, Label, List, Switch};
+use lvgl::{Align, Event, LvResult, NativeObject, Obj, Screen, Widget};
+use mfrc522::Error;
+
 use crate::graphics::{Theme, Unipage, WidgetFactory};
 use crate::lcd::InteractableDisplay;
 
 const fn percent(percent: u32) -> u32 { (1 << 13) | percent }
 
-pub fn main_page<'a>(
-	mut wf: WidgetFactory<Screen<'_>>,
+pub fn main_page(
+	mut wf: WidgetFactory<Screen>,
 	theme: &'static impl Theme,
-	display: &mut InteractableDisplay<'a>
+	display: &mut InteractableDisplay
 ) -> LvResult<()> {
 	let mut title = wf.create_widget(Label::create)?;
 	theme.primary_label(&mut title);
@@ -65,9 +68,10 @@ pub fn main_page<'a>(
 			})?;
 		program_button.set_width(percent(100));
 		theme.secondary_button(&mut program_button);
+		let program_theme = *&theme;
 		program_button.on_event(|_, e| {
 			if let Event::Clicked = e {
-				match Unipage::try_new(theme, display, program_page) {
+				match Unipage::try_new(program_theme, display, program_page) {
 					Ok(page) => display.push_page(page),
 					Err(err) => error!("Something went wrong creating the programming page ({err})")
 				}
@@ -107,10 +111,10 @@ pub fn main_page<'a>(
 	Ok(())
 }
 
-fn borrow_page<'a>(
-	mut wf: WidgetFactory<Screen<'_>>,
+fn borrow_page(
+	mut wf: WidgetFactory<Screen>,
 	theme: &'static impl Theme,
-	display: &mut InteractableDisplay<'a>
+	display: &mut InteractableDisplay
 ) -> LvResult<()> {
 	let mut label = wf.create_widget(Label::create)?;
 	theme.primary_label(&mut label);
@@ -132,15 +136,17 @@ fn borrow_page<'a>(
 	Ok(())
 }
 
-fn program_page<'a>(
-	mut wf: WidgetFactory<Screen<'_>>,
+fn program_page(
+	mut wf: WidgetFactory<Screen>,
 	theme: &'static impl Theme,
-	display: &mut InteractableDisplay<'a>
+	display: &mut InteractableDisplay
 ) -> LvResult<()> {
 	let mut label = wf.create_widget(Label::create)?;
 	theme.primary_label(&mut label);
 	label.set_text_static(cstr!("Program RFID"));
 	label.set_width(percent(100));
+
+	let default_write = Rc::new(Cell::new(false));
 
 	let mut list = wf.create_parent_widget(List::create, theme, |mut wf, theme| {
 		let mut dropdown_container =
@@ -170,6 +176,15 @@ fn program_page<'a>(
 				overwrite_switch.set_align(Align::TopRight, 0, 0);
 				theme.switch(&mut overwrite_switch);
 
+				let event_default_write = default_write.clone();
+				overwrite_switch.on_event(move |widget, e| {
+					if let Event::ValueChanged = e {
+						event_default_write.set(unsafe {
+							lv_obj_has_state(widget.raw().as_ptr(), LV_STATE_CHECKED as lv_state_t)
+						});
+					}
+				})?;
+
 				Ok(())
 			})?;
 		theme.option_container(&mut overwrite_container);
@@ -189,8 +204,12 @@ fn program_page<'a>(
 				})?;
 			theme.secondary_button(&mut cancel_button);
 			cancel_button.on_event(|_, e| {
-				if let Event::Clicked = e {
+				/*if let Event::Clicked = e {
 					display.pop_page();
+				}*/
+
+				if let Event::Clicked = e {
+					Unipage::try_new_with_rfid_read(7..8, theme, display, test_rfid).unwrap();
 				}
 			})?;
 			cancel_button.set_align(Align::LeftMid, 0, 0);
@@ -203,10 +222,23 @@ fn program_page<'a>(
 					Ok(())
 				})?;
 			theme.primary_button(&mut program_button);
-			program_button.on_event(|_, e| {
+			program_button.on_event(move |_, e| {
+				let default_write = default_write.clone();
+				(|| {
 				if let Event::Clicked = e {
-					let headers = vec![];
-					let promise = HttpPromise::new(
+					Unipage::try_new_with_rfid_write(
+						vec![
+							(6, *b"hello\0\0\0\0\0\0\0\0\0\0\0"),
+							(7, *b"dont write\0\0\0\0\0\0"),
+						],
+						default_write.get(),
+						theme,
+						display,
+						test_rfid_write
+					)
+					.unwrap();
+					/*let headers = vec![];
+					Unipage::try_new_with_http(
 						Method::Post,
 						"https://api.easy.drewbryan.org/login".into(),
 						Some(LoginRequest {
@@ -216,27 +248,13 @@ fn program_page<'a>(
 							password:           "admin".into()
 						}),
 						headers,
-						|packet: Packet<LoginResponse>, display| {
-							match packet {
-								Packet::Ok(packet) => {
-									let page = Unipage::try_new(
-										theme,
-										display,
-										move |wf, theme, display| test(packet, wf, theme, display)
-									);
-									match page {
-										Ok(page) => display.push_page(page),
-										Err(err) => error!("Error creating test page ({err})")
-									}
-								}
-								Packet::Error(err) => {
-									error!("Error getting login response ({})", err.message);
-								}
-							}
-						}
-					);
-					display.add_promise(promise);
+						theme,
+						display,
+						test
+					)
+					.unwrap();*/
 				}
+			})();
 			})?;
 			program_button.set_align(Align::RightMid, 0, 0);
 			program_button.set_width(percent(45));
@@ -249,12 +267,19 @@ fn program_page<'a>(
 	Ok(())
 }
 
-fn test<'a>(
-	packet: LoginResponse,
-	mut wf: WidgetFactory<Screen<'_>>,
+fn test(
+	packet: Packet<LoginResponse>,
+	mut wf: WidgetFactory<Screen>,
 	theme: &'static impl Theme,
-	_display: &mut InteractableDisplay<'a>
+	_display: &mut InteractableDisplay
 ) -> LvResult<()> {
+	let packet = match packet {
+		Packet::Ok(packet) => packet,
+		Packet::Error(err) => {
+			error!("err packet: ({})", err.message);
+			return Ok(());
+		}
+	};
 	let mut label = wf.create_widget(Label::create)?;
 	label.set_text(
 		CString::new(packet.session_id)
@@ -263,5 +288,27 @@ fn test<'a>(
 	);
 	theme.primary_label(&mut label);
 
+	Ok(())
+}
+
+fn test_rfid(
+	data: Result<Vec<[u8; 16]>, Error<SpiError>>,
+	mut wf: WidgetFactory<Screen>,
+	theme: &'static impl Theme,
+	_display: &mut InteractableDisplay
+) -> LvResult<()> {
+	let data = data.unwrap().concat();
+	let mut label = wf.create_widget(Label::create)?;
+	label.set_text(CString::new(data).unwrap().as_c_str());
+	theme.primary_label(&mut label);
+	Ok(())
+}
+
+fn test_rfid_write(
+	result: Result<(), Error<SpiError>>,
+	mut wf: WidgetFactory<Screen>,
+	theme: &'static impl Theme,
+	_display: &mut InteractableDisplay
+) -> LvResult<()> {
 	Ok(())
 }

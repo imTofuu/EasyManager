@@ -21,6 +21,7 @@ use std::rc::Rc;
 use cstr_core::CString;
 use embassy_executor::Spawner;
 use embassy_time::Timer;
+use esp_idf_hal::gpio::PinDriver;
 use esp_idf_hal::rmt::config::{MemoryAccess, TxChannelConfig};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::gpio::{Gpio0, Gpio1};
@@ -39,7 +40,7 @@ use log::{LevelFilter, debug, error, info};
 use rgb::RGB8;
 use rustyfarian_esp_idf_ws2812::Ws2812Rmt;
 
-use crate::communications::{RfidReader, run_wifi};
+use crate::communications::run_wifi;
 use crate::lcd::run_lcd;
 
 fn panic(panic_info: &PanicHookInfo) {
@@ -103,10 +104,14 @@ async fn main(spawner: Spawner) {
 	};
 
 	let mut led_driver =
-		Ws2812Rmt::new_with_channel_config(peripherals.pins.gpio25, led_channel_config)
+		Ws2812Rmt::new_with_channel_config(peripherals.pins.gpio22, led_channel_config)
 			.expect("Failed to create LED driver");
 	led_driver
-		.set_pixel(RGB8::new(0 /* green */, 255, 0))
+		.set_pixels_slice(&[
+			RGB8::new(255, 0, 0),
+			RGB8::new(0, 255, 0),
+			RGB8::new(0, 0, 255)
+		])
 		.unwrap();
 
 	let spi2 = SpiDriver::new(
@@ -163,15 +168,11 @@ async fn main(spawner: Spawner) {
 		..Default::default()
 	};
 
-	let mut rfid_device = RfidReader::new(&spi3, Some(peripherals.pins.gpio5), |uid, _| {
-		info!("uid: {:?}", uid.as_bytes());
-		[0xff; 6]
-	})
-	.unwrap_or_else(|err| panic!("Failed to create RFID device ({err})"));
-
 	spawner.spawn(
 		run_lcd(
 			http_config,
+			spi3,
+			peripherals.pins.gpio5.degrade_output(),
 			spi2,
 			peripherals.pins.gpio15.degrade_output(),
 			peripherals.pins.gpio26.degrade_output(),
@@ -182,6 +183,9 @@ async fn main(spawner: Spawner) {
 		)
 		.unwrap_or_else(|err| panic!("Failed to obtain LCD task token ({err})"))
 	);
+
+	let mut lcd_led = PinDriver::output(peripherals.pins.gpio25).unwrap();
+	lcd_led.set_high();
 
 	spawner.spawn(
 		run_wifi(
@@ -196,44 +200,5 @@ async fn main(spawner: Spawner) {
 
 	loop {
 		Timer::after_millis(5).await;
-
-		match rfid_device.reqa_collect_data(3..5) {
-			Ok(Some(data)) => {
-				info!("rfid data: {data:?}")
-			}
-			Err(err) => {
-				error!("Failed to read RFID tag: ({err})");
-			}
-			_ => {}
-		}
-
-		if let Err(err) = rfid_device.reqa_write_data([(1u8, *b"hello\0\0\0\0\0\0\0\0\0\0\0")]) {
-			error!("Failed to write RFID tag ({err})");
-		}
-
-		/*if !wifi_is_connected.get() {
-			continue;
-		}
-
-		let headers = [(CLIENT_VERSION_HN, get_core_version())];
-		let request =
-			match http_client.request(Method::Get, "https://api.easy.drewbryan.org/ping", &headers)
-			{
-				Ok(req) => req,
-				Err(err) => {
-					error!("Failed to create HTTP request ({err})");
-					continue;
-				}
-			};
-
-		let response = match request.submit() {
-			Ok(response) => response,
-			Err(err) => {
-				error!("Failed to make HTTP request ({err})");
-				continue;
-			}
-		};
-
-		info!("Status: {}", response.status());*/
 	}
 }
