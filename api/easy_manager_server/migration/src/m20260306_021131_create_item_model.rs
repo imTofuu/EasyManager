@@ -9,7 +9,7 @@ enum ItemModel {
 	ItemModelId,
 	Name,
 	Description,
-	PermissionLevel
+	PermissionLevel,
 }
 
 #[async_trait::async_trait]
@@ -24,16 +24,16 @@ impl MigrationTrait for Migration {
 						ColumnDef::new(ItemModel::ItemModelId)
 							.uuid()
 							.primary_key()
-							.not_null()
+							.not_null(),
 					)
 					.col(ColumnDef::new(ItemModel::Name).string().not_null())
 					.col(ColumnDef::new(ItemModel::Description).string())
 					.col(
 						ColumnDef::new(ItemModel::PermissionLevel)
 							.string()
-							.not_null()
+							.not_null(),
 					)
-					.to_owned()
+					.to_owned(),
 			)
 			.await
 	}

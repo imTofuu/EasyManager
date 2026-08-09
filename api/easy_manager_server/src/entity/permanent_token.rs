@@ -3,13 +3,12 @@
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "session")]
+#[sea_orm(table_name = "permanent_token")]
 pub struct Model {
 	#[sea_orm(primary_key, auto_increment = false)]
-	pub session_id: Uuid,
+	pub token: Uuid,
 	pub user_id: Uuid,
-	pub created_at: DateTimeWithTimeZone,
-	pub expired: bool,
+	pub enabled: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

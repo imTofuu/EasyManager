@@ -1,17 +1,15 @@
-use sea_orm_migration::prelude::*;
-
 use crate::m20220101_000001_create_users::User;
+use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
 #[derive(Iden)]
-enum Session {
+enum PermanentToken {
 	Table,
-	SessionId,
+	Token,
 	UserId,
-	CreatedAt,
-	Expired,
+	Enabled,
 }
 
 #[async_trait::async_trait]
@@ -20,31 +18,20 @@ impl MigrationTrait for Migration {
 		manager
 			.create_table(
 				Table::create()
-					.table(Session::Table)
+					.table(PermanentToken::Table)
 					.if_not_exists()
 					.col(
-						ColumnDef::new(Session::SessionId)
+						ColumnDef::new(PermanentToken::Token)
 							.uuid()
 							.primary_key()
 							.not_null(),
 					)
-					.col(ColumnDef::new(Session::UserId).uuid().not_null())
-					.col(
-						ColumnDef::new(Session::CreatedAt)
-							.timestamp_with_time_zone()
-							.default(Expr::current_timestamp())
-							.not_null(),
-					)
-					.col(
-						ColumnDef::new(Session::Expired)
-							.boolean()
-							.default(false)
-							.not_null(),
-					)
+					.col(ColumnDef::new(PermanentToken::UserId).uuid().not_null())
+					.col(ColumnDef::new(PermanentToken::Enabled).boolean().not_null())
 					.foreign_key(
 						ForeignKey::create()
-							.name("fk-session-userid")
-							.from(Session::Table, Session::UserId)
+							.name("fk-permanenttoken-userid")
+							.from(PermanentToken::Table, PermanentToken::UserId)
 							.to(User::Table, User::UserId),
 					)
 					.to_owned(),
@@ -54,7 +41,7 @@ impl MigrationTrait for Migration {
 
 	async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
 		manager
-			.drop_table(Table::drop().table(Session::Table).to_owned())
+			.drop_table(Table::drop().table(PermanentToken::Table).to_owned())
 			.await
 	}
 }

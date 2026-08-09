@@ -3,5 +3,6 @@
 pub mod prelude;
 
 pub mod item_model;
+pub mod permanent_token;
 pub mod session;
 pub mod user;
