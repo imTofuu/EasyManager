@@ -43,6 +43,7 @@ pub mod get {
 	#[derive(Debug, serde::Serialize, serde::Deserialize)]
 	pub struct GetUserInfoResponse {
 		pub username: String,
+		pub user_id: String,
 		pub permission_level: PermissionLevel,
 	}
 

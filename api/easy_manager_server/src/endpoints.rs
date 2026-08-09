@@ -89,6 +89,7 @@ pub async fn get_public_user_info(
 		StatusCode::OK,
 		Packet::Ok(GetUserInfoResponse {
 			username: user.username,
+			user_id: user.user_id.to_string(),
 			permission_level,
 		})
 		.into(),
@@ -119,6 +120,7 @@ pub async fn get_users(
 		.map(|user| {
 			Ok::<GetUserInfoResponse, String>(GetUserInfoResponse {
 				username: user.username,
+				user_id: user.user_id.to_string(),
 				permission_level: user.permission_level.try_into()?,
 			})
 		})
