@@ -10,7 +10,7 @@ enum PermanentToken {
 	Table,
 	Token,
 	UserId,
-	Enabled
+	Enabled,
 }
 
 #[async_trait::async_trait]
@@ -25,7 +25,7 @@ impl MigrationTrait for Migration {
 						ColumnDef::new(PermanentToken::Token)
 							.uuid()
 							.primary_key()
-							.not_null()
+							.not_null(),
 					)
 					.col(ColumnDef::new(PermanentToken::UserId).uuid().not_null())
 					.col(ColumnDef::new(PermanentToken::Enabled).boolean().not_null())
@@ -33,9 +33,9 @@ impl MigrationTrait for Migration {
 						ForeignKey::create()
 							.name("fk-permanenttoken-userid")
 							.from(PermanentToken::Table, PermanentToken::UserId)
-							.to(User::Table, User::UserId)
+							.to(User::Table, User::UserId),
 					)
-					.to_owned()
+					.to_owned(),
 			)
 			.await
 	}

@@ -11,7 +11,7 @@ enum Session {
 	SessionId,
 	UserId,
 	CreatedAt,
-	Expired
+	Expired,
 }
 
 #[async_trait::async_trait]
@@ -26,28 +26,28 @@ impl MigrationTrait for Migration {
 						ColumnDef::new(Session::SessionId)
 							.uuid()
 							.primary_key()
-							.not_null()
+							.not_null(),
 					)
 					.col(ColumnDef::new(Session::UserId).uuid().not_null())
 					.col(
 						ColumnDef::new(Session::CreatedAt)
 							.timestamp_with_time_zone()
 							.default(Expr::current_timestamp())
-							.not_null()
+							.not_null(),
 					)
 					.col(
 						ColumnDef::new(Session::Expired)
 							.boolean()
 							.default(false)
-							.not_null()
+							.not_null(),
 					)
 					.foreign_key(
 						ForeignKey::create()
 							.name("fk-session-userid")
 							.from(Session::Table, Session::UserId)
-							.to(User::Table, User::UserId)
+							.to(User::Table, User::UserId),
 					)
-					.to_owned()
+					.to_owned(),
 			)
 			.await
 	}
