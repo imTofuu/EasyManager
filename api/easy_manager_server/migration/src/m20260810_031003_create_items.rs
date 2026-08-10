@@ -1,5 +1,6 @@
+use sea_orm_migration::prelude::*;
+
 use crate::m20260306_021131_create_item_model::ItemModel;
-use sea_orm_migration::{prelude::*, schema::*};
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;

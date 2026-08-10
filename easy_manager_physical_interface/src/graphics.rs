@@ -29,6 +29,7 @@ use lvgl::sys::{
 };
 use lvgl::widgets::{Btn, Label, List, Switch};
 use lvgl::{Color, LvResult, NativeObject, Obj, Part, Screen, TextAlign, Widget};
+use lvgl::misc::area::LV_SIZE_CONTENT;
 use mfrc522::Error;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -411,8 +412,10 @@ impl ModernTheme {
 			list: {
 				let mut style = Style::default();
 				style.set_bg_color(dominant);
+				style.set_height(LV_SIZE_CONTENT as i16);
 				style.set_pad_top(5);
 				style.set_pad_left(5);
+				style.set_pad_bottom(5);
 				style.set_pad_right(5);
 				style.set_pad_row(10);
 				StyleCell::new(style)
@@ -423,6 +426,11 @@ impl ModernTheme {
 				style.set_flex_flow(FlexFlow::ROW_WRAP);
 				style.set_border_opa(Opacity::OPA_0);
 				style.set_bg_opa(Opacity::OPA_0);
+				style.set_height(LV_SIZE_CONTENT as i16);
+				style.set_pad_top(5);
+				style.set_pad_left(5);
+				style.set_pad_bottom(5);
+				style.set_pad_right(5);
 				StyleCell::new(style)
 			},
 

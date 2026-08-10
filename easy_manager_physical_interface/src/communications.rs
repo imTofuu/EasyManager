@@ -404,8 +404,8 @@ pub async fn run_wifi(
 	// Setup Wi-Fi until success
 
 	let config = WifiConfiguration::Client(ClientConfiguration {
-		ssid: "Otumoetai_BYOD".try_into().unwrap(),
-		auth_method: AuthMethod::WPA2Enterprise,
+		ssid: "".try_into().unwrap(),
+		auth_method: AuthMethod::WPA2Personal,
 		password: "".try_into().unwrap(),
 		..Default::default()
 	});
