@@ -4,7 +4,7 @@ use std::ops::Range;
 use easy_manager_core::packets::Packet;
 use embedded_svc::http::Method;
 use esp_idf_hal::spi::SpiError;
-use log::{error};
+use log::error;
 use lvgl::font::Font;
 use lvgl::style::{FlexAlign, FlexFlow, Layout, Opacity, Style};
 use lvgl::sys::{
@@ -145,8 +145,15 @@ impl<'a> Unipage<'a> {
 			&'static T,
 			&mut InteractableDisplay
 		) -> LvResult<()>
-		+ 'static
+		+ 'static,
+		loading_screen: impl FnOnce(
+			WidgetFactory<Screen>,
+			&'static T,
+			&mut InteractableDisplay
+		) -> LvResult<()>
 	) -> LvResult<()> {
+		let loading_screen_page = Self::try_new(theme, display, loading_screen)?;
+		display.push_page(loading_screen_page);
 		let promise = HttpPromise::new(
 			method,
 			uri,
@@ -163,7 +170,7 @@ impl<'a> Unipage<'a> {
 						return;
 					}
 				};
-				// todo loading screen
+				closure_display.pop_page();
 				closure_display.push_page(page);
 			}
 		);

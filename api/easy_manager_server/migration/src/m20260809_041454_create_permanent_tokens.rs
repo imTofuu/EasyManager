@@ -1,5 +1,6 @@
-use crate::m20220101_000001_create_users::User;
 use sea_orm_migration::prelude::*;
+
+use crate::m20220101_000001_create_users::User;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -9,7 +10,7 @@ enum PermanentToken {
 	Table,
 	Token,
 	UserId,
-	Enabled,
+	Enabled
 }
 
 #[async_trait::async_trait]
@@ -24,7 +25,7 @@ impl MigrationTrait for Migration {
 						ColumnDef::new(PermanentToken::Token)
 							.uuid()
 							.primary_key()
-							.not_null(),
+							.not_null()
 					)
 					.col(ColumnDef::new(PermanentToken::UserId).uuid().not_null())
 					.col(ColumnDef::new(PermanentToken::Enabled).boolean().not_null())
@@ -32,9 +33,9 @@ impl MigrationTrait for Migration {
 						ForeignKey::create()
 							.name("fk-permanenttoken-userid")
 							.from(PermanentToken::Table, PermanentToken::UserId)
-							.to(User::Table, User::UserId),
+							.to(User::Table, User::UserId)
 					)
-					.to_owned(),
+					.to_owned()
 			)
 			.await
 	}

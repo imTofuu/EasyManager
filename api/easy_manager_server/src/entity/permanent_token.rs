@@ -6,9 +6,9 @@ use sea_orm::entity::prelude::*;
 #[sea_orm(table_name = "permanent_token")]
 pub struct Model {
 	#[sea_orm(primary_key, auto_increment = false)]
-	pub token: Uuid,
+	pub token:   Uuid,
 	pub user_id: Uuid,
-	pub enabled: bool,
+	pub enabled: bool
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -20,13 +20,11 @@ pub enum Relation {
 		on_update = "NoAction",
 		on_delete = "NoAction"
 	)]
-	User,
+	User
 }
 
 impl Related<super::user::Entity> for Entity {
-	fn to() -> RelationDef {
-		Relation::User.def()
-	}
+	fn to() -> RelationDef { Relation::User.def() }
 }
 
 impl ActiveModelBehavior for ActiveModel {}

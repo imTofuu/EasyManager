@@ -275,19 +275,15 @@ impl<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> MifareKey> RfidRead
 
 					let mut new_key = self.inner.mf_read(trailer_block)?;
 					new_key[..6].copy_from_slice(&self.get_auth_for_block(&uid, block));
-					while self.inner.mf_read(trailer_block)? != new_key {
-						self.inner.mf_write(trailer_block, new_key)?;
-					}
+					self.inner.mf_write(trailer_block, new_key)?;
 					written_key_sectors.push(sector);
 				}
 			}
 
 			self.inner
 				.mf_authenticate(&uid, block, &self.get_auth_for_block(&uid, block))?;
-			
-			while self.inner.mf_read(block)? != data {
-				self.inner.mf_write(block, data)?;
-			}
+
+			self.inner.mf_write(block, data)?;
 		}
 		self.inner.hlta()?;
 		self.inner.stop_crypto1()?;
@@ -406,8 +402,16 @@ pub async fn run_wifi(
 	is_connected: Rc<Cell<bool>>
 ) -> ! {
 	// Setup Wi-Fi until success
+
+	let config = WifiConfiguration::Client(ClientConfiguration {
+		ssid: "Otumoetai_BYOD".try_into().unwrap(),
+		auth_method: AuthMethod::WPA2Enterprise,
+		password: "".try_into().unwrap(),
+		..Default::default()
+	});
+
 	loop {
-		match get_current_wifi_config(&wifi).await {
+		/*match get_current_wifi_config(&wifi).await {
 			Some(_) => debug!("Previous WiFi config found"),
 			None => {
 				warn!("Previous WiFi config is missing or invalid");
@@ -424,7 +428,9 @@ pub async fn run_wifi(
 					}
 				};
 			}
-		}
+		}*/
+
+		wifi.set_configuration(&config).unwrap();
 
 		if let Err(err) = wifi.start().await {
 			error!("Failed to start WiFi driver ({err}); retrying setup");
@@ -446,7 +452,9 @@ pub async fn run_wifi(
 			}
 			None => {
 				warn!("Previous WiFi config is missing or invalid");
-				match create_new_wifi_config(&mut uart, &mut nvs).await {
+				wifi.set_configuration(&config).unwrap();
+				continue;
+				/*match create_new_wifi_config(&mut uart, &mut nvs).await {
 					Ok(config) => {
 						if let Err(err) = wifi.set_configuration(&WifiConfiguration::Client(config))
 						{
@@ -461,7 +469,7 @@ pub async fn run_wifi(
 						}
 						continue;
 					}
-				}
+				}*/
 			}
 		};
 
