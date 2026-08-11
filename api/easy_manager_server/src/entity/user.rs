@@ -18,10 +18,18 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
+	#[sea_orm(has_many = "super::borrow::Entity")]
+	Borrow,
 	#[sea_orm(has_many = "super::permanent_token::Entity")]
 	PermanentToken,
 	#[sea_orm(has_many = "super::session::Entity")]
 	Session,
+}
+
+impl Related<super::borrow::Entity> for Entity {
+	fn to() -> RelationDef {
+		Relation::Borrow.def()
+	}
 }
 
 impl Related<super::permanent_token::Entity> for Entity {

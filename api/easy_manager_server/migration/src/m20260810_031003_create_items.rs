@@ -6,7 +6,7 @@ use crate::m20260306_021131_create_item_model::ItemModel;
 pub struct Migration;
 
 #[derive(Iden)]
-enum Item {
+pub enum Item {
 	Table,
 	ItemId,
 	Name,

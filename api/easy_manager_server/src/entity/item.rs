@@ -13,6 +13,8 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
+	#[sea_orm(has_many = "super::borrow::Entity")]
+	Borrow,
 	#[sea_orm(
 		belongs_to = "super::item_model::Entity",
 		from = "Column::ItemModelId",
@@ -21,6 +23,12 @@ pub enum Relation {
 		on_delete = "NoAction"
 	)]
 	ItemModel,
+}
+
+impl Related<super::borrow::Entity> for Entity {
+	fn to() -> RelationDef {
+		Relation::Borrow.def()
+	}
 }
 
 impl Related<super::item_model::Entity> for Entity {

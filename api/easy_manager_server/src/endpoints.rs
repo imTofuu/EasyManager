@@ -1,5 +1,8 @@
 use std::str::FromStr;
 
+use crate::ResponsePacket;
+use crate::entity::prelude::{Borrow, Item, ItemModel, PermanentToken, Session, User};
+use crate::entity::{borrow, item_model, permanent_token, session, user};
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{Error, SaltString};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
@@ -13,8 +16,9 @@ use easy_manager_core::packets::get::{
 	GetUsersResponse,
 };
 use easy_manager_core::packets::post::{
-	CreateItemModelRequest, CreateUserRequest, LoginRequest, LoginResponse,
+	BorrowRequest, CreateItemModelRequest, CreateUserRequest, LoginRequest, LoginResponse,
 	LoginUsingPermanentTokenRequest, ObtainPermanentTokenRequest, ObtainPermanentTokenResponse,
+	ReturnRequest,
 };
 use easy_manager_core::packets::{ErrorPacket, Packet};
 use easy_manager_core::{AccountIdentifier, PermissionLevel};
@@ -22,13 +26,10 @@ use migration::Expr;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use sea_orm::{
-	ColumnTrait, DatabaseConnection, DbErr, EntityTrait, InsertResult, NotSet, QueryFilter, Set,
+	ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, InsertResult,
+	IntoActiveModel, NotSet, QueryFilter, Set,
 };
 use uuid::Uuid;
-
-use crate::ResponsePacket;
-use crate::entity::prelude::{Item, ItemModel, PermanentToken, Session, User};
-use crate::entity::{item_model, permanent_token, session, user};
 
 static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| {
 	Regex::new(r#"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"#)
@@ -55,9 +56,12 @@ pub async fn get_public_user_info(
 				tracing::error!("I dont event know what happened here");
 				return (
 					StatusCode::INTERNAL_SERVER_ERROR,
-					Packet::Error(ErrorPacket {
-						message: "Something went wrong".to_owned(),
-					})
+					Packet::Error(
+						StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+						ErrorPacket {
+							message: "Something went wrong".to_owned(),
+						},
+					)
 					.into(),
 				);
 			}
@@ -66,9 +70,12 @@ pub async fn get_public_user_info(
 			tracing::error!(%err, "Failed to get user from session model");
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
-				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -80,9 +87,12 @@ pub async fn get_public_user_info(
 			tracing::error!(%err, "Permission level of user is malformed");
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
-				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -90,11 +100,14 @@ pub async fn get_public_user_info(
 
 	(
 		StatusCode::OK,
-		Packet::Ok(GetUserInfoResponse {
-			username: user.username,
-			user_id: user.user_id.to_string(),
-			permission_level,
-		})
+		Packet::Ok(
+			StatusCode::OK.as_u16(),
+			GetUserInfoResponse {
+				username: user.username,
+				user_id: user.user_id.to_string(),
+				permission_level,
+			},
+		)
 		.into(),
 	)
 }
@@ -110,9 +123,12 @@ pub async fn get_users(
 			tracing::error!(%err, "Failed to get all users from database");
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
-				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -134,9 +150,12 @@ pub async fn get_users(
 			tracing::error!(%err, "Failed to collect all users");
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
-				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -144,10 +163,11 @@ pub async fn get_users(
 
 	(
 		StatusCode::OK,
-		Packet::Ok(GetUsersResponse { users }).into(),
+		Packet::Ok(StatusCode::OK.as_u16(), GetUsersResponse { users }).into(),
 	)
 }
 
+#[tracing::instrument]
 pub async fn get_logged_in_user(
 	state: State<DatabaseConnection>,
 	cookie_jar: CookieJar,
@@ -165,9 +185,12 @@ pub async fn get_logged_in_user(
 				return (
 					StatusCode::BAD_REQUEST,
 					cookie_jar,
-					Packet::Error(ErrorPacket {
-						message: "Malformed session".to_owned(),
-					})
+					Packet::Error(
+						StatusCode::BAD_REQUEST.as_u16(),
+						ErrorPacket {
+							message: "Malformed session".to_owned(),
+						},
+					)
 					.into(),
 				);
 			}
@@ -176,9 +199,12 @@ pub async fn get_logged_in_user(
 			return (
 				StatusCode::BAD_REQUEST,
 				cookie_jar,
-				Packet::Error(ErrorPacket {
-					message: "Missing session id".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::BAD_REQUEST.as_u16(),
+					ErrorPacket {
+						message: "Missing session id".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -190,9 +216,12 @@ pub async fn get_logged_in_user(
 			return (
 				StatusCode::BAD_REQUEST,
 				cookie_jar,
-				Packet::Error(ErrorPacket {
-					message: "Invalid session".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::BAD_REQUEST.as_u16(),
+					ErrorPacket {
+						message: "Invalid session".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -201,9 +230,12 @@ pub async fn get_logged_in_user(
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
 				cookie_jar,
-				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -214,6 +246,7 @@ pub async fn get_logged_in_user(
 	(code, cookie_jar, response)
 }
 
+#[tracing::instrument]
 pub async fn get_item(
 	state: State<DatabaseConnection>,
 	Path(item_id): Path<Uuid>,
@@ -223,9 +256,12 @@ pub async fn get_item(
 		Ok(None) => {
 			return (
 				StatusCode::BAD_REQUEST,
-				Packet::Error(ErrorPacket {
-					message: "Invalid item".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::BAD_REQUEST.as_u16(),
+					ErrorPacket {
+						message: "Invalid item".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -233,9 +269,12 @@ pub async fn get_item(
 			tracing::error!(%err, "Failed to get item from database");
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
-				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -243,15 +282,19 @@ pub async fn get_item(
 
 	(
 		StatusCode::OK,
-		Packet::Ok(GetItemInfoResponse {
-			name: item_record.name,
-			item_id: item_record.item_id.to_string(),
-			item_model_id: item_record.item_model_id.to_string(),
-		})
+		Packet::Ok(
+			StatusCode::OK.as_u16(),
+			GetItemInfoResponse {
+				name: item_record.name,
+				item_id: item_record.item_id.to_string(),
+				item_model_id: item_record.item_model_id.to_string(),
+			},
+		)
 		.into(),
 	)
 }
 
+#[tracing::instrument]
 pub async fn get_items(
 	state: State<DatabaseConnection>,
 ) -> (StatusCode, ResponsePacket<GetItemsResponse>) {
@@ -261,9 +304,12 @@ pub async fn get_items(
 			tracing::error!(%err, "Failed to get all items from database");
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
-				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -280,7 +326,7 @@ pub async fn get_items(
 
 	(
 		StatusCode::OK,
-		Packet::Ok(GetItemsResponse { items }).into(),
+		Packet::Ok(StatusCode::OK.as_u16(), GetItemsResponse { items }).into(),
 	)
 }
 
@@ -295,23 +341,26 @@ pub async fn create_item_model(
 		get_public_user_info(state.clone(), Path(session.user_id)).await;
 
 	match user_info.0 {
-		Packet::Ok(get_user_info_response) => {
+		Packet::Ok(_, get_user_info_response) => {
 			if get_user_info_response.permission_level < PermissionLevel::Admin {
 				return (
 					StatusCode::FORBIDDEN,
 					cookie_jar,
-					Packet::Error(ErrorPacket {
-						message: "Insufficient permissions".to_owned(),
-					})
+					Packet::Error(
+						StatusCode::FORBIDDEN.as_u16(),
+						ErrorPacket {
+							message: "Insufficient permissions".to_owned(),
+						},
+					)
 					.into(),
 				);
 			}
 		}
-		Packet::Error(err) => {
+		Packet::Error(code, err) => {
 			return (
 				get_user_info_status_code,
 				cookie_jar,
-				Packet::Error(err).into(),
+				Packet::Error(code, err).into(),
 			);
 		}
 	}
@@ -329,14 +378,21 @@ pub async fn create_item_model(
 		return (
 			StatusCode::INTERNAL_SERVER_ERROR,
 			cookie_jar,
-			Packet::Error(ErrorPacket {
-				message: "Something went wrong".to_owned(),
-			})
+			Packet::Error(
+				StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+				ErrorPacket {
+					message: "Something went wrong".to_owned(),
+				},
+			)
 			.into(),
 		);
 	}
 
-	(StatusCode::CREATED, cookie_jar, Packet::Ok(()).into())
+	(
+		StatusCode::CREATED,
+		cookie_jar,
+		Packet::Ok(StatusCode::CREATED.as_u16(), ()).into(),
+	)
 }
 
 #[tracing::instrument]
@@ -347,9 +403,12 @@ pub async fn create_user_unchecked(
 	if !EMAIL_REGEX.is_match(create_user_request.email.as_str()) {
 		return (
 			StatusCode::BAD_REQUEST,
-			Packet::Error(ErrorPacket {
-				message: "Invalid email".to_owned(),
-			})
+			Packet::Error(
+				StatusCode::BAD_REQUEST.as_u16(),
+				ErrorPacket {
+					message: "Invalid email".to_owned(),
+				},
+			)
 			.into(),
 		);
 	}
@@ -363,9 +422,12 @@ pub async fn create_user_unchecked(
 			tracing::error!(%err, "Failed to hash password");
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
-				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -387,15 +449,21 @@ pub async fn create_user_unchecked(
 			tracing::error!(%err, "Failed to insert into database");
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
-				Packet::Error(ErrorPacket {
-					message: "Failed to insert into database".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Failed to insert into database".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
 	};
 
-	(StatusCode::CREATED, Packet::Ok(()).into())
+	(
+		StatusCode::CREATED,
+		Packet::Ok(StatusCode::CREATED.as_u16(), ()).into(),
+	)
 }
 
 #[tracing::instrument]
@@ -409,18 +477,21 @@ pub async fn create_user(
 	let (status_code, user_info) = get_public_user_info(state.clone(), Path(session.user_id)).await;
 
 	match user_info.0 {
-		Packet::Ok(get_user_info_response) => {
+		Packet::Ok(_, get_user_info_response) => {
 			if get_user_info_response.permission_level < PermissionLevel::Admin {
 				return (
 					StatusCode::FORBIDDEN,
-					Packet::Error(ErrorPacket {
-						message: "Insufficient permissions".to_owned(),
-					})
+					Packet::Error(
+						StatusCode::FORBIDDEN.as_u16(),
+						ErrorPacket {
+							message: "Insufficient permissions".to_owned(),
+						},
+					)
 					.into(),
 				);
 			}
 		}
-		Packet::Error(err) => return (status_code, Packet::Error(err).into()),
+		Packet::Error(code, err) => return (status_code, Packet::Error(code, err).into()),
 	}
 
 	create_user_unchecked(&state.0, create_user_request).await
@@ -513,9 +584,12 @@ pub async fn login(
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
 				cookie_jar,
-				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -528,9 +602,12 @@ pub async fn login(
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
 				cookie_jar,
-				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -542,9 +619,12 @@ pub async fn login(
 			Error::Password => (
 				StatusCode::UNAUTHORIZED,
 				cookie_jar,
-				Packet::Error(ErrorPacket {
-					message: "Invalid username or password".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::UNAUTHORIZED.as_u16(),
+					ErrorPacket {
+						message: "Invalid username or password".to_owned(),
+					},
+				)
 				.into(),
 			),
 			_ => {
@@ -552,9 +632,12 @@ pub async fn login(
 				(
 					StatusCode::INTERNAL_SERVER_ERROR,
 					cookie_jar,
-					Packet::Error(ErrorPacket {
-						message: "Something went wrong".to_owned(),
-					})
+					Packet::Error(
+						StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+						ErrorPacket {
+							message: "Something went wrong".to_owned(),
+						},
+					)
 					.into(),
 				)
 			}
@@ -567,9 +650,12 @@ pub async fn login(
 		return (
 			StatusCode::UNAUTHORIZED,
 			cookie_jar,
-			Packet::Error(ErrorPacket {
-				message: "Invalid username or password".to_owned(),
-			})
+			Packet::Error(
+				StatusCode::UNAUTHORIZED.as_u16(),
+				ErrorPacket {
+					message: "Invalid username or password".to_owned(),
+				},
+			)
 			.into(),
 		);
 	}
@@ -583,9 +669,12 @@ pub async fn login(
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
 				cookie_jar,
-				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -594,9 +683,12 @@ pub async fn login(
 	(
 		StatusCode::CREATED,
 		cookie_jar,
-		Packet::Ok(LoginResponse {
-			session_id: session.last_insert_id.to_string(),
-		})
+		Packet::Ok(
+			StatusCode::CREATED.as_u16(),
+			LoginResponse {
+				session_id: session.last_insert_id.to_string(),
+			},
+		)
 		.into(),
 	)
 }
@@ -616,9 +708,12 @@ pub async fn login_using_permanent_token(
 			return (
 				StatusCode::BAD_REQUEST,
 				cookie_jar,
-				Packet::Error(ErrorPacket {
-					message: "Invalid token".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::BAD_REQUEST.as_u16(),
+					ErrorPacket {
+						message: "Invalid token".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -627,9 +722,12 @@ pub async fn login_using_permanent_token(
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
 				cookie_jar,
-				Packet::Error(ErrorPacket {
-					message: "Something went wrong".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -643,9 +741,12 @@ pub async fn login_using_permanent_token(
 				return (
 					StatusCode::INTERNAL_SERVER_ERROR,
 					cookie_jar,
-					Packet::Error(ErrorPacket {
-						message: "Something went wrong".to_owned(),
-					})
+					Packet::Error(
+						StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+						ErrorPacket {
+							message: "Something went wrong".to_owned(),
+						},
+					)
 					.into(),
 				);
 			}
@@ -654,9 +755,12 @@ pub async fn login_using_permanent_token(
 	(
 		StatusCode::CREATED,
 		cookie_jar,
-		Packet::Ok(LoginResponse {
-			session_id: session.last_insert_id.to_string(),
-		})
+		Packet::Ok(
+			StatusCode::CREATED.as_u16(),
+			LoginResponse {
+				session_id: session.last_insert_id.to_string(),
+			},
+		)
 		.into(),
 	)
 }
@@ -672,9 +776,12 @@ pub async fn obtain_permanent_token(
 		Err(_) => {
 			return (
 				StatusCode::BAD_REQUEST,
-				Packet::Error(ErrorPacket {
-					message: "Invalid user id".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::BAD_REQUEST.as_u16(),
+					ErrorPacket {
+						message: "Invalid user id".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -694,9 +801,12 @@ pub async fn obtain_permanent_token(
 			tracing::error!(%err, "Failed to insert permanent token into database");
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
-				Packet::Error(ErrorPacket {
-					message: "Something went wrong. Probably an invalid user id".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong. Probably an invalid user id".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -704,9 +814,12 @@ pub async fn obtain_permanent_token(
 			tracing::error!(%err, "Failed to insert permanent token into database");
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
-				Packet::Error(ErrorPacket {
-					message: "Something went wrong.".to_owned(),
-				})
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong.".to_owned(),
+					},
+				)
 				.into(),
 			);
 		}
@@ -714,10 +827,220 @@ pub async fn obtain_permanent_token(
 
 	(
 		StatusCode::CREATED,
-		Packet::Ok(ObtainPermanentTokenResponse {
-			token: uuid.as_u128(),
-		})
+		Packet::Ok(
+			StatusCode::CREATED.as_u16(),
+			ObtainPermanentTokenResponse {
+				token: uuid.as_u128(),
+			},
+		)
 		.into(),
+	)
+}
+
+#[tracing::instrument]
+pub async fn borrow(
+	state: State<DatabaseConnection>,
+	Json(borrow_request): Json<BorrowRequest>,
+) -> (StatusCode, ResponsePacket<()>) {
+	let user_id = match Uuid::try_parse(borrow_request.user_id.as_str()) {
+		Ok(user_id) => user_id,
+		Err(_) => {
+			return (
+				StatusCode::BAD_REQUEST,
+				Packet::Error(
+					StatusCode::BAD_REQUEST.as_u16(),
+					ErrorPacket {
+						message: "Malformed user id".to_owned(),
+					},
+				)
+				.into(),
+			);
+		}
+	};
+
+	if let Packet::Error(..) = get_public_user_info(state.clone(), Path(user_id.clone()))
+		.await
+		.1
+		.0
+	{
+		return (
+			StatusCode::BAD_REQUEST,
+			Packet::Error(
+				StatusCode::BAD_REQUEST.as_u16(),
+				ErrorPacket {
+					message: "Invalid user id".to_owned(),
+				},
+			)
+			.into(),
+		);
+	}
+
+	let item_id = match Uuid::try_parse(borrow_request.item_id.as_str()) {
+		Ok(item_id) => item_id,
+		Err(_) => {
+			return (
+				StatusCode::BAD_REQUEST,
+				Packet::Error(
+					StatusCode::BAD_REQUEST.as_u16(),
+					ErrorPacket {
+						message: "Malformed item id".to_owned(),
+					},
+				)
+				.into(),
+			);
+		}
+	};
+
+	if let Packet::Error(..) = get_item(state.clone(), Path(item_id.clone())).await.1.0 {
+		return (
+			StatusCode::BAD_REQUEST,
+			Packet::Error(
+				StatusCode::BAD_REQUEST.as_u16(),
+				ErrorPacket {
+					message: "Invalid item id".to_owned(),
+				},
+			)
+			.into(),
+		);
+	}
+
+	let active_model = borrow::ActiveModel {
+		borrow_id: Set(Uuid::new_v4()),
+		user_id: Set(user_id),
+		item_id: Set(item_id),
+		created_at: NotSet,
+		returned: NotSet,
+	};
+
+	match Borrow::find()
+		.filter(borrow::Column::ItemId.eq(item_id))
+		.filter(borrow::Column::Returned.eq(false))
+		.one(&state.0)
+		.await
+	{
+		Ok(Some(_)) => {
+			return (
+				StatusCode::BAD_REQUEST,
+				Packet::Error(
+					StatusCode::BAD_REQUEST.as_u16(),
+					ErrorPacket {
+						message: "Item is already borrowed right now".to_owned(),
+					},
+				)
+				.into(),
+			);
+		}
+		Err(err) => {
+			tracing::error!(%err, "Failed to check if item is already borrowed");
+			return (
+				StatusCode::INTERNAL_SERVER_ERROR,
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
+				.into(),
+			);
+		}
+		_ => {}
+	}
+
+	if let Err(err) = Borrow::insert(active_model).exec(&state.0).await {
+		tracing::error!(%err, "Failed to insert borrow record");
+		return (
+			StatusCode::INTERNAL_SERVER_ERROR,
+			Packet::Error(
+				StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+				ErrorPacket {
+					message: "Something went wrong".to_owned(),
+				},
+			)
+			.into(),
+		);
+	}
+
+	(
+		StatusCode::CREATED,
+		Packet::Ok(StatusCode::CREATED.as_u16(), ()).into(),
+	)
+}
+
+#[tracing::instrument]
+pub async fn return_item(
+	state: State<DatabaseConnection>,
+	Json(return_request): Json<ReturnRequest>,
+) -> (StatusCode, ResponsePacket<()>) {
+	let item_id = match Uuid::try_parse(return_request.item_id.as_str()) {
+		Ok(item_id) => item_id,
+		Err(_) => {
+			return (
+				StatusCode::BAD_REQUEST,
+				Packet::Error(
+					StatusCode::BAD_REQUEST.as_u16(),
+					ErrorPacket {
+						message: "Malformed item id".to_owned(),
+					},
+				)
+				.into(),
+			);
+		}
+	};
+
+	match Borrow::find()
+		.filter(borrow::Column::ItemId.eq(item_id))
+		.filter(borrow::Column::Returned.eq(false))
+		.one(&state.0)
+		.await
+	{
+		Ok(Some(record)) => {
+			let mut active_model = record.into_active_model();
+			active_model.returned = Set(true);
+
+			if let Err(err) = active_model.update(&state.0).await {
+				tracing::error!(%err, "Failed to update borrow record");
+				return (
+					StatusCode::INTERNAL_SERVER_ERROR,
+					Packet::Error(
+						StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+						ErrorPacket {
+							message: "Something went wrong".to_owned(),
+						},
+					)
+					.into(),
+				);
+			}
+		}
+		Ok(None) => {
+			return (
+				StatusCode::NOT_MODIFIED,
+				Packet::Error(
+					StatusCode::NOT_MODIFIED.as_u16(),
+					ErrorPacket {
+						message: "Item does not need to be returned".to_owned(),
+					},
+				)
+				.into(),
+			);
+		}
+		Err(err) => {
+			tracing::error!(%err, "Failed to get borrow from database");
+			return (
+				StatusCode::INTERNAL_SERVER_ERROR,
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
+				.into(),
+			);
+		}
+	}
+
+	(
+		StatusCode::OK,
+		Packet::Ok(StatusCode::OK.as_u16(), ()).into(),
 	)
 }
 

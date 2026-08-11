@@ -2,6 +2,7 @@
 
 pub mod prelude;
 
+pub mod borrow;
 pub mod item;
 pub mod item_model;
 pub mod permanent_token;

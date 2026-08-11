@@ -74,10 +74,7 @@ struct ResponsePacket<T: serde::Serialize + serde::de::DeserializeOwned>(Packet<
 
 impl<T: serde::Serialize + serde::de::DeserializeOwned> IntoResponse for ResponsePacket<T> {
 	fn into_response(self) -> axum::response::Response {
-		match self.0 {
-			Packet::Ok(val) => axum::Json(val).into_response(),
-			Packet::Error(error_packet) => axum::Json(error_packet).into_response(),
-		}
+		axum::Json(self.0).into_response()
 	}
 }
 
@@ -102,9 +99,12 @@ async fn auth_middleware(
 				return (
 					StatusCode::UNAUTHORIZED,
 					cookie_jar,
-					ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
-						message: "Invalid session, please login again".to_owned(),
-					})),
+					ResponsePacket::from(Packet::<()>::Error(
+						StatusCode::UNAUTHORIZED.as_u16(),
+						ErrorPacket {
+							message: "Invalid session, please login again".to_owned(),
+						},
+					)),
 				)
 					.into_response();
 			}
@@ -113,9 +113,12 @@ async fn auth_middleware(
 			return (
 				StatusCode::UNAUTHORIZED,
 				cookie_jar,
-				ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
-					message: "Please login".to_owned(),
-				})),
+				ResponsePacket::from(Packet::<()>::Error(
+					StatusCode::UNAUTHORIZED.as_u16(),
+					ErrorPacket {
+						message: "Please login".to_owned(),
+					},
+				)),
 			)
 				.into_response();
 		}
@@ -129,9 +132,12 @@ async fn auth_middleware(
 					return (
 						StatusCode::FORBIDDEN,
 						cookie_jar,
-						ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
-							message: "Session is expired, please login again".to_owned(),
-						})),
+						ResponsePacket::from(Packet::<()>::Error(
+							StatusCode::FORBIDDEN.as_u16(),
+							ErrorPacket {
+								message: "Session is expired, please login again".to_owned(),
+							},
+						)),
 					)
 						.into_response();
 				}
@@ -142,9 +148,12 @@ async fn auth_middleware(
 				return (
 					StatusCode::FORBIDDEN,
 					cookie_jar,
-					ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
-						message: "Session is not found, please login again".to_owned(),
-					})),
+					ResponsePacket::from(Packet::<()>::Error(
+						StatusCode::FORBIDDEN.as_u16(),
+						ErrorPacket {
+							message: "Session is not found, please login again".to_owned(),
+						},
+					)),
 				)
 					.into_response();
 			}
@@ -154,9 +163,12 @@ async fn auth_middleware(
 			return (
 				StatusCode::INTERNAL_SERVER_ERROR,
 				cookie_jar,
-				ResponsePacket::from(Packet::<()>::Error(ErrorPacket {
-					message: "Something went wrong validating the session".to_owned(),
-				})),
+				ResponsePacket::from(Packet::<()>::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong validating the session".to_owned(),
+					},
+				)),
 			)
 				.into_response();
 		}
@@ -285,6 +297,8 @@ async fn main() -> Result<(), EasyManagerError> {
 			"/obtain_permanent_token",
 			method_routing::post(endpoints::obtain_permanent_token),
 		)
+		.route("/borrow", method_routing::post(endpoints::borrow))
+		.route("/return", method_routing::post(endpoints::return_item))
 		.with_state(db_connection.clone());
 
 	let main_router = auth_router
@@ -293,9 +307,12 @@ async fn main() -> Result<(), EasyManagerError> {
 		.fallback(async |uri: Uri| -> (StatusCode, ResponsePacket<()>) {
 			(
 				StatusCode::NOT_FOUND,
-				Packet::Error(ErrorPacket {
-					message: format!("Route not found for {uri}"),
-				})
+				Packet::Error(
+					StatusCode::NOT_FOUND.as_u16(),
+					ErrorPacket {
+						message: format!("Route not found for {uri}"),
+					},
+				)
 				.into(),
 			)
 		});

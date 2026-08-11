@@ -7,6 +7,7 @@ mod m20260302_100018_create_session;
 mod m20260306_021131_create_item_model;
 mod m20260809_041454_create_permanent_tokens;
 mod m20260810_031003_create_items;
+mod m20260811_052550_borrow;
 
 pub struct Migrator;
 
@@ -19,6 +20,7 @@ impl MigratorTrait for Migrator {
 			Box::new(m20260306_021131_create_item_model::Migration),
 			Box::new(m20260809_041454_create_permanent_tokens::Migration),
 			Box::new(m20260810_031003_create_items::Migration),
+			Box::new(m20260811_052550_borrow::Migration),
 		]
 	}
 }

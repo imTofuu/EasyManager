@@ -28,10 +28,10 @@ pub struct ErrorPacket {
 	pub message: String,
 }
 
-#[derive(Deserialize)]
-pub enum Packet<T: serde::Serialize> {
-	Ok(T),
-	Error(ErrorPacket),
+#[derive(serde::Serialize, Deserialize)]
+pub enum Packet<T> {
+	Ok(u16, T),
+	Error(u16, ErrorPacket),
 }
 
 pub mod get {
@@ -64,7 +64,7 @@ pub mod get {
 		pub items: Box<[GetItemInfoResponse]>,
 	}
 
-	#[derive(serde::Serialize, serde::Deserialize)]
+	#[derive(Debug, serde::Serialize, serde::Deserialize)]
 	pub struct GetLoggedInUserRequest {
 		pub session: Option<String>,
 	}
@@ -116,6 +116,17 @@ pub mod post {
 	#[derive(Debug, serde::Serialize, serde::Deserialize)]
 	pub struct LoginUsingPermanentTokenRequest {
 		pub token: u128,
+	}
+
+	#[derive(Debug, serde::Serialize, serde::Deserialize)]
+	pub struct BorrowRequest {
+		pub item_id: String,
+		pub user_id: String,
+	}
+
+	#[derive(Debug, serde::Serialize, serde::Deserialize)]
+	pub struct ReturnRequest {
+		pub item_id: String,
 	}
 
 	impl Debug for LoginRequest {
