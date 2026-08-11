@@ -36,7 +36,7 @@ use serde::de::DeserializeOwned;
 use crate::lcd::InteractableDisplay;
 use crate::uart_read_line;
 
-pub type HttpWorkResult = Result<Vec<u8>, ErrorPacket>;
+pub type HttpWorkResult = Result<(u16, Vec<u8>), ErrorPacket>;
 pub type HttpWork = dyn FnOnce(&mut Client<EspHttpConnection>) -> HttpWorkResult + Send;
 pub type HttpPromiseClosure = dyn FnOnce(HttpWorkResult, &mut InteractableDisplay);
 
@@ -56,9 +56,23 @@ impl HttpPromise {
 		Self {
 			work: Box::new(
 				move |http: &mut Client<EspHttpConnection>| -> HttpWorkResult {
+					let body_json = match body {
+						Some(body) => {
+							let mut serializer = serde_json::Serializer::new(Vec::new());
+							if let Err(err) = body.serialize(&mut serializer) {
+								return Err(ErrorPacket {
+									message: format!("Failed to serialize request body: {err}")
+								});
+							}
+							serializer.into_inner()
+						}
+						None => Vec::new()
+					};
+
 					headers.extend_from_slice(&[
 						(CLIENT_VERSION_HN.into(), get_core_version().into()),
-						("Content-Type".into(), "application/json".into())
+						("Content-Type".into(), "application/json".into()),
+						("Content-Length".into(), body_json.len().to_string())
 					]);
 					let hdrs: Vec<_> = headers
 						.iter()
@@ -73,19 +87,10 @@ impl HttpPromise {
 						}
 					};
 
-					if let Some(body) = body {
-						let mut serializer = serde_json::Serializer::new(Vec::new());
-						if let Err(err) = body.serialize(&mut serializer) {
-							return Err(ErrorPacket {
-								message: format!("Failed to serialize request body: {err}")
-							});
-						}
-						let body_json = serializer.into_inner();
-						if let Err(err) = req.connection().write_all(body_json.as_slice()) {
-							return Err(ErrorPacket {
-								message: format!("Failed to write request body: {err}")
-							});
-						}
+					if let Err(err) = req.connection().write_all(body_json.as_slice()) {
+						return Err(ErrorPacket {
+							message: format!("Failed to write request body: {err}")
+						});
 					}
 
 					let mut res = match req.submit() {
@@ -124,30 +129,22 @@ impl HttpPromise {
 						});
 					}
 
-					Ok(buf)
+					Ok((res.status(), buf))
 				}
 			),
 			done: Box::new(|data_result, display| {
 				let packet = match data_result {
-					Ok(data) => {
+					Ok((code, data)) => {
 						match serde_json::from_slice(data.as_slice()) {
-							Ok(packet) => Packet::Ok(packet),
-							Err(err1) => {
-								match serde_json::from_slice(data.as_slice()) {
-									Ok(packet) => Packet::Error(packet),
-									Err(err2) => {
-										Packet::Error(ErrorPacket {
-											message: format!(
-												"Failed to parse error packet: {err2}\nafter \
-												 failing to parse normal packet: {err1}"
-											)
-										})
-									}
-								}
+							Ok(packet) => packet,
+							Err(err) => {
+								Packet::Error(code, ErrorPacket {
+									message: format!("Failed to parse error packet: {err}")
+								})
 							}
 						}
 					}
-					Err(err) => Packet::Error(err)
+					Err(err) => Packet::Error(0, err)
 				};
 				promise_closure(packet, display);
 			})
@@ -403,15 +400,8 @@ pub async fn run_wifi(
 ) -> ! {
 	// Setup Wi-Fi until success
 
-	let config = WifiConfiguration::Client(ClientConfiguration {
-		ssid: "".try_into().unwrap(),
-		auth_method: AuthMethod::WPA2Personal,
-		password: "".try_into().unwrap(),
-		..Default::default()
-	});
-
 	loop {
-		/*match get_current_wifi_config(&wifi).await {
+		match get_current_wifi_config(&wifi).await {
 			Some(_) => debug!("Previous WiFi config found"),
 			None => {
 				warn!("Previous WiFi config is missing or invalid");
@@ -428,9 +418,7 @@ pub async fn run_wifi(
 					}
 				};
 			}
-		}*/
-
-		wifi.set_configuration(&config).unwrap();
+		}
 
 		if let Err(err) = wifi.start().await {
 			error!("Failed to start WiFi driver ({err}); retrying setup");
@@ -452,9 +440,7 @@ pub async fn run_wifi(
 			}
 			None => {
 				warn!("Previous WiFi config is missing or invalid");
-				wifi.set_configuration(&config).unwrap();
-				continue;
-				/*match create_new_wifi_config(&mut uart, &mut nvs).await {
+				match create_new_wifi_config(&mut uart, &mut nvs).await {
 					Ok(config) => {
 						if let Err(err) = wifi.set_configuration(&WifiConfiguration::Client(config))
 						{
@@ -469,7 +455,7 @@ pub async fn run_wifi(
 						}
 						continue;
 					}
-				}*/
+				}
 			}
 		};
 

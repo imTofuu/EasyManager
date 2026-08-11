@@ -6,6 +6,7 @@ use embedded_svc::http::Method;
 use esp_idf_hal::spi::SpiError;
 use log::error;
 use lvgl::font::Font;
+use lvgl::misc::area::LV_SIZE_CONTENT;
 use lvgl::style::{FlexAlign, FlexFlow, Layout, Opacity, Style};
 use lvgl::sys::{
 	LV_PART_INDICATOR,
@@ -29,7 +30,6 @@ use lvgl::sys::{
 };
 use lvgl::widgets::{Btn, Label, List, Switch};
 use lvgl::{Color, LvResult, NativeObject, Obj, Part, Screen, TextAlign, Widget};
-use lvgl::misc::area::LV_SIZE_CONTENT;
 use mfrc522::Error;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -172,6 +172,7 @@ impl<'a> Unipage<'a> {
 					}
 				};
 				closure_display.pop_page();
+				closure_display.pop_page();
 				closure_display.push_page(page);
 			}
 		);
@@ -205,6 +206,7 @@ impl<'a> Unipage<'a> {
 						return;
 					}
 				};
+				display.pop_page();
 				display.push_page(page);
 			})
 		);
@@ -239,6 +241,7 @@ impl<'a> Unipage<'a> {
 						return;
 					}
 				};
+				display.pop_page();
 				display.push_page(page);
 			})
 		);

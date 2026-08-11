@@ -3,11 +3,24 @@ use std::rc::Rc;
 
 use cstr_core::{CString, cstr};
 use easy_manager_core::packets::Packet;
-use easy_manager_core::packets::get::{GetItemsResponse, GetUsersResponse};
-use easy_manager_core::packets::post::{ObtainPermanentTokenRequest, ObtainPermanentTokenResponse};
+use easy_manager_core::packets::get::{
+	GetItemInfoResponse,
+	GetItemsResponse,
+	GetLoggedInUserRequest,
+	GetUserInfoResponse,
+	GetUsersResponse
+};
+use easy_manager_core::packets::post::{
+	BorrowRequest,
+	LoginResponse,
+	LoginUsingPermanentTokenRequest,
+	ObtainPermanentTokenRequest,
+	ObtainPermanentTokenResponse,
+	ReturnRequest
+};
 use embedded_svc::http::Method;
 use esp_idf_sys::esp_restart;
-use log::error;
+use log::{error, info};
 use lvgl::misc::area::LV_SIZE_CONTENT;
 use lvgl::sys::{
 	LV_STATE_CHECKED,
@@ -19,8 +32,12 @@ use lvgl::sys::{
 use lvgl::widgets::{Btn, Label, List, Switch};
 use lvgl::{Align, Event, LvResult, NativeObject, Obj, Screen, Widget};
 use uuid::Uuid;
+
 use crate::graphics::{Theme, Unipage, WidgetFactory};
 use crate::lcd::InteractableDisplay;
+
+const USER_TYPE: [u8; 16] = *b"USER\0\0\0\0\0\0\0\0\0\0\0\0";
+const ITEM_TYPE: [u8; 16] = *b"ITEM\0\0\0\0\0\0\0\0\0\0\0\0";
 
 const fn percent(percent: u32) -> u32 { (1 << 13) | percent }
 
@@ -33,11 +50,13 @@ fn http_loading_screen(
 	theme.primary_label(&mut label);
 	label.set_text_static(cstr!("Please wait"));
 	label.set_width(percent(100));
+	label.set_align(Align::TopMid, 0, 0);
 
 	Ok(())
 }
 
 fn err_page(
+	code: u16,
 	emsg: &str,
 	mut wf: WidgetFactory<Screen>,
 	theme: &'static impl Theme,
@@ -47,6 +66,15 @@ fn err_page(
 	title.set_text_static(cstr!("Error:"));
 	title.set_width(percent(100));
 	theme.primary_label(&mut title);
+
+	let mut code_label = wf.create_widget(Label::create)?;
+	code_label.set_text(
+		CString::new(code.to_string().as_str())
+			.unwrap_or(CString::new("Failed to parse error message").unwrap())
+			.as_c_str()
+	);
+	code_label.set_width(percent(100));
+	theme.secondary_label(&mut code_label);
 
 	let mut message = wf.create_widget(Label::create)?;
 	message.set_text(
@@ -105,15 +133,6 @@ pub fn main_page(
 				}
 			}
 		})?;
-
-		let mut return_button = wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
-			let mut label = wf.create_widget(Label::create)?;
-			label.set_text_static(cstr!("Return"));
-			label.set_width(percent(100));
-			Ok(())
-		})?;
-		return_button.set_width(percent(100));
-		theme.secondary_button(&mut return_button);
 
 		let mut program_button =
 			wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
@@ -178,10 +197,15 @@ fn borrow_page(
 	theme: &'static impl Theme,
 	display: &mut InteractableDisplay
 ) -> LvResult<()> {
-	let mut label = wf.create_widget(Label::create)?;
-	theme.primary_label(&mut label);
-	label.set_text_static(cstr!("Borrow page"));
-	label.set_width(percent(100));
+	let mut title = wf.create_widget(Label::create)?;
+	theme.primary_label(&mut title);
+	title.set_text_static(cstr!("Borrow / Return"));
+	title.set_width(percent(100));
+
+	let mut subtitle = wf.create_widget(Label::create)?;
+	subtitle.set_text_static(cstr!("Scan item"));
+	subtitle.set_width(percent(100));
+	theme.secondary_label(&mut subtitle);
 
 	let mut back_button = wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
 		let mut label = wf.create_widget(Label::create)?;
@@ -194,6 +218,384 @@ fn borrow_page(
 			display.pop_page();
 		}
 	})?;
+
+	Unipage::try_new_with_rfid_read(4..6, theme, display, |data, mut wf, theme, display| {
+		match data {
+			Ok(data) => {
+				if let Some(data_type) = data.get(0) {
+					if *data_type == USER_TYPE {
+						return err_page(
+							0,
+							"error: invalid card type (expected item, got user)",
+							wf,
+							theme,
+							display
+						);
+					}
+
+					let mut title = wf.create_widget(Label::create)?;
+					title.set_text_static(cstr!("Please wait"));
+					title.set_width(percent(100));
+					title.set_align(Align::TopMid, 0, 0);
+					theme.primary_label(&mut title);
+
+					let item_id = Uuid::from_u128(u128::from_ne_bytes(
+						data.get(1).cloned().unwrap_or([0u8; 16])
+					))
+					.to_string();
+
+					Unipage::try_new_with_http(
+						Method::Get,
+						format!("https://api.easy.drewbryan.org/item/{item_id}"),
+						None::<()>,
+						vec![],
+						theme,
+						display,
+						scan_user_for_borrow_page,
+						http_loading_screen
+					)?;
+				}
+			}
+			Err(err) => {
+				err_page(0, format!("error: {err:?}").as_str(), wf, theme, display)?;
+			}
+		}
+
+		Ok(())
+	})?;
+
+	Ok(())
+}
+
+fn scan_user_for_borrow_page(
+	packet: Packet<GetItemInfoResponse>,
+	mut wf: WidgetFactory<Screen>,
+	theme: &'static impl Theme,
+	display: &mut InteractableDisplay
+) -> LvResult<()> {
+	match packet {
+		Packet::Ok(_, packet) => {
+			let mut title = wf.create_widget(Label::create)?;
+			theme.primary_label(&mut title);
+			title.set_text_static(cstr!("Borrow / Return"));
+			title.set_width(percent(100));
+
+			if packet.borrow_id.is_none() {
+				let mut subtitle = wf.create_widget(Label::create)?;
+				theme.secondary_label(&mut subtitle);
+				subtitle.set_text_static(cstr!("Scan user"));
+			}
+
+			let mut item_container =
+				wf.create_parent_widget(Obj::create, theme, |mut wf, theme| {
+					let mut label = wf.create_widget(Label::create)?;
+					label.set_text_static(cstr!("Item:"));
+					label.set_align(Align::LeftMid, 0, 0);
+					theme.misc_label(&mut label);
+
+					let name_text =
+						CString::new(packet.name.as_str()).unwrap_or(cstr!("?").to_owned());
+					let mut name = wf.create_widget(Label::create)?;
+					name.set_text(name_text.as_c_str());
+					name.set_align(Align::RightMid, 0, 0);
+					theme.misc_label(&mut name);
+
+					Ok(())
+				})?;
+			theme.option_container(&mut item_container);
+			item_container.set_width(percent(100));
+
+			if packet.borrow_id.is_some() {
+				let mut return_button =
+					wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
+						let mut label = wf.create_widget(Label::create)?;
+						label.set_text_static(cstr!("Return"));
+						Ok(())
+					})?;
+				theme.primary_button(&mut return_button);
+				return_button.set_width(percent(100));
+
+				let mut return_closure = |item_id: &str| {
+					Unipage::try_new_with_http(
+						Method::Post,
+						"https://api.easy.drewbryan.org/return".to_string(),
+						Some(ReturnRequest {
+							item_id: item_id.to_string()
+						}),
+						vec![],
+						theme,
+						display,
+						|packet: Packet<()>, mut wf, theme, display| {
+							match packet {
+								Packet::Ok(..) => {
+									let mut label = wf.create_widget(Label::create)?;
+									label.set_text_static(cstr!("Successfully\n returned"));
+									label.set_width(percent(100));
+									label.set_align(Align::Center, 0, 0);
+									theme.primary_label(&mut label);
+
+									let mut ok_button = wf.create_parent_widget(
+										Btn::create,
+										theme,
+										|mut wf, _theme| {
+											let mut label = wf.create_widget(Label::create)?;
+											label.set_text_static(cstr!("Ok"));
+											Ok(())
+										}
+									)?;
+									theme.primary_button(&mut ok_button);
+									ok_button.on_event(|_, e| {
+										if let Event::Clicked = e {
+											display.pop_page();
+										}
+									})?;
+								}
+								Packet::Error(code, err) => {
+									err_page(code, err.message.as_str(), wf, theme, display)?;
+								}
+							}
+							Ok(())
+						},
+						http_loading_screen
+					)
+					.unwrap();
+				};
+
+				return_button.on_event(move |_, e| {
+					if let Event::Clicked = e {
+						return_closure(packet.item_id.as_str())
+					}
+				})?;
+			} else {
+				Unipage::try_new_with_rfid_read(
+					4..6,
+					theme,
+					display,
+					move |data, mut wf, theme, display| {
+						match data {
+							Ok(data) => {
+								if let Some(data_type) = data.get(0) {
+									if *data_type == ITEM_TYPE {
+										return err_page(
+											0,
+											"error: invalid card type (expected user, got item)",
+											wf,
+											theme,
+											display
+										);
+									}
+
+									let mut title = wf.create_widget(Label::create)?;
+									title.set_text_static(cstr!("Please wait"));
+									title.set_width(percent(100));
+									title.set_align(Align::TopMid, 0, 0);
+									theme.primary_label(&mut title);
+
+									let login_token = u128::from_ne_bytes(
+										data.get(1).cloned().unwrap_or([0u8; 16])
+									);
+
+									Unipage::try_new_with_http(
+										Method::Post,
+										"https://api.easy.drewbryan.org/login_using_perm_token"
+											.to_string(),
+										Some(LoginUsingPermanentTokenRequest {
+											token: login_token
+										}),
+										vec![],
+										theme,
+										display,
+										move |data, wf, theme, display| {
+											confirm_borrow_page(packet, data, wf, theme, display)
+										},
+										http_loading_screen
+									)?;
+								}
+							}
+							Err(err) => {
+								err_page(
+									0,
+									format!("error: {err:?}").as_str(),
+									wf,
+									theme,
+									display
+								)?;
+							}
+						}
+
+						Ok(())
+					}
+				)?;
+			}
+		}
+		Packet::Error(code, err) => {
+			err_page(code, err.message.as_str(), wf, theme, display)?;
+		}
+	}
+
+	Ok(())
+}
+
+fn confirm_borrow_page(
+	item_info: GetItemInfoResponse,
+	packet: Packet<LoginResponse>,
+	mut wf: WidgetFactory<Screen>,
+	theme: &'static impl Theme,
+	display: &mut InteractableDisplay
+) -> LvResult<()> {
+	match packet {
+		Packet::Ok(_, packet) => {
+			let mut title = wf.create_widget(Label::create)?;
+			title.set_text_static(cstr!("Please wait"));
+			title.set_width(percent(100));
+			title.set_align(Align::TopMid, 0, 0);
+			theme.primary_label(&mut title);
+
+			Unipage::try_new_with_http(
+				Method::Get,
+				"https://api.easy.drewbryan.org/logged_in_user".to_string(),
+				Some(GetLoggedInUserRequest {
+					session: Some(packet.session_id)
+				}),
+				vec![],
+				theme,
+				display,
+				move |packet: Packet<GetUserInfoResponse>, mut wf, theme, display| {
+					match packet {
+						Packet::Ok(_, packet) => {
+							let mut title = wf.create_widget(Label::create).unwrap();
+							theme.primary_label(&mut title);
+							title.set_text_static(cstr!("Borrow / Return"));
+							title.set_width(percent(100));
+
+							let mut item_container = wf
+								.create_parent_widget(Obj::create, theme, |mut wf, theme| {
+									let mut label = wf.create_widget(Label::create)?;
+									label.set_text_static(cstr!("Item:"));
+									label.set_align(Align::LeftMid, 0, 0);
+									theme.misc_label(&mut label);
+
+									let name_text = CString::new(item_info.name.as_str())
+										.unwrap_or(cstr!("?").to_owned());
+									let mut name = wf.create_widget(Label::create)?;
+									name.set_text(name_text.as_c_str());
+									name.set_align(Align::RightMid, 0, 0);
+									theme.misc_label(&mut name);
+
+									Ok(())
+								})
+								.unwrap();
+							theme.option_container(&mut item_container);
+							item_container.set_width(percent(100));
+
+							let mut user_container = wf
+								.create_parent_widget(Obj::create, theme, |mut wf, theme| {
+									let mut label = wf.create_widget(Label::create)?;
+									label.set_text_static(cstr!("User:"));
+									label.set_align(Align::LeftMid, 0, 0);
+									theme.misc_label(&mut label);
+
+									let name_text = CString::new(packet.username.as_str())
+										.unwrap_or(cstr!("?").to_owned());
+									let mut name = wf.create_widget(Label::create)?;
+									name.set_text(name_text.as_c_str());
+									name.set_align(Align::RightMid, 0, 0);
+									theme.misc_label(&mut name);
+
+									Ok(())
+								})
+								.unwrap();
+							theme.option_container(&mut user_container);
+							user_container.set_width(percent(100));
+
+							let mut borrow_button =
+								wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
+									let mut label = wf.create_widget(Label::create)?;
+									label.set_text_static(cstr!("Borrow"));
+									Ok(())
+								})?;
+							theme.primary_button(&mut borrow_button);
+							borrow_button.set_width(percent(100));
+
+							let mut borrow_closure = |item_id: &str, user_id: &str| {
+								Unipage::try_new_with_http(
+									Method::Post,
+									"https://api.easy.drewbryan.org/borrow".to_string(),
+									Some(BorrowRequest {
+										item_id: item_id.to_string(),
+										user_id: user_id.to_string()
+									}),
+									vec![],
+									theme,
+									display,
+									|packet: Packet<()>, mut wf, theme, display| {
+										match packet {
+											Packet::Ok(..) => {
+												let mut label = wf.create_widget(Label::create)?;
+												label.set_text_static(cstr!(
+													"Successfully\n borrowed"
+												));
+												label.set_align(Align::Center, 0, 0);
+												label.set_width(percent(100));
+												theme.primary_label(&mut label);
+
+												let mut ok_button = wf.create_parent_widget(
+													Btn::create,
+													theme,
+													|mut wf, _theme| {
+														let mut label =
+															wf.create_widget(Label::create)?;
+														label.set_text_static(cstr!("Ok"));
+														Ok(())
+													}
+												)?;
+												theme.primary_button(&mut ok_button);
+												ok_button.on_event(|_, e| {
+													if let Event::Clicked = e {
+														display.pop_page();
+													}
+												})?;
+											}
+											Packet::Error(code, err) => {
+												err_page(
+													code,
+													err.message.as_str(),
+													wf,
+													theme,
+													display
+												)?;
+											}
+										}
+										Ok(())
+									},
+									http_loading_screen
+								)
+								.unwrap();
+							};
+
+							borrow_button.on_event(move |_, e| {
+								if let Event::Clicked = e {
+									borrow_closure(
+										item_info.item_id.as_str(),
+										packet.user_id.as_str()
+									)
+								}
+							})?;
+						}
+						Packet::Error(code, err) => {
+							err_page(code, err.message.as_str(), wf, theme, display)?;
+						}
+					}
+
+					Ok(())
+				},
+				http_loading_screen
+			)?;
+		}
+		Packet::Error(code, err) => {
+			err_page(code, err.message.as_str(), wf, theme, display)?;
+		}
+	}
 
 	Ok(())
 }
@@ -249,15 +651,16 @@ fn program_page(
 		wf.create_parent_widget(List::create, theme, |mut wf, theme| {
 			let mut final_buttons_container =
 				wf.create_parent_widget(Obj::create, theme, |mut wf, theme| {
-					let mut item_button = wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
-						let mut label = wf.create_widget(Label::create)?;
-						label.set_text_static(cstr!("Item"));
-						Ok(())
-					})?;
+					let mut item_button =
+						wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
+							let mut label = wf.create_widget(Label::create)?;
+							label.set_text_static(cstr!("Item"));
+							Ok(())
+						})?;
 					theme.primary_button(&mut item_button);
 					item_button.set_align(Align::LeftMid, 0, 0);
 					item_button.set_width(percent(45));
-					
+
 					let mut program_item_closure = |default: bool| {
 						if let Err(err) = Unipage::try_new_with_http(
 							Method::Get,
@@ -275,14 +678,14 @@ fn program_page(
 							display.pop_page();
 						}
 					};
-					
+
 					let item_button_default_flag = write_new_card_option.clone();
 					item_button.on_event(move |_, e| {
 						if let Event::Clicked = e {
 							program_item_closure(!item_button_default_flag.get())
 						}
 					})?;
-					
+
 					let mut user_button =
 						wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
 							let mut label = wf.create_widget(Label::create)?;
@@ -355,11 +758,11 @@ fn program_item_page(
 	display: &mut InteractableDisplay
 ) -> LvResult<()> {
 	match packet {
-		Packet::Ok(packet) => {
+		Packet::Ok(_, packet) => {
 			let mut title = wf.create_widget(Label::create)?;
 			title.set_text_static(cstr!("Select item"));
 			theme.primary_label(&mut title);
-			
+
 			let mut list = wf.create_parent_widget(List::create, theme, |mut wf, theme| {
 				for item in packet.items {
 					let mut failed_name = false;
@@ -386,9 +789,11 @@ fn program_item_page(
 							);
 						}
 					}
-					
+
 					let mut write_item_on_card = |item_id: u128, default: bool| {
-						let page = match Unipage::try_new(theme, display, |wf, theme, display| write_item_page(item_id, default, wf, theme, display)) {
+						let page = match Unipage::try_new(theme, display, |wf, theme, display| {
+							write_item_page(item_id, default, wf, theme, display)
+						}) {
 							Ok(page) => page,
 							Err(err) => {
 								error!("Failed to make page ({err})");
@@ -397,7 +802,7 @@ fn program_item_page(
 						};
 						display.push_page(page);
 					};
-					
+
 					match Uuid::try_parse(item.item_id.as_str()) {
 						Ok(uuid) => {
 							item_button.on_event(move |_, e| {
@@ -409,7 +814,10 @@ fn program_item_page(
 						Err(err) => {
 							error!("Invalid item id ({err:?})");
 							unsafe {
-								lv_obj_add_state(item_button.raw().as_ptr(), LV_STATE_DISABLED as lv_state_t);
+								lv_obj_add_state(
+									item_button.raw().as_ptr(),
+									LV_STATE_DISABLED as lv_state_t
+								);
 							}
 						}
 					}
@@ -419,11 +827,11 @@ fn program_item_page(
 			theme.list(&mut list);
 			list.set_width(percent(100));
 		}
-		Packet::Error(err) => {
-			err_page(err.message.as_str(), wf, theme, display)?;
+		Packet::Error(code, err) => {
+			err_page(code, err.message.as_str(), wf, theme, display)?;
 		}
 	}
-	
+
 	Ok(())
 }
 
@@ -437,12 +845,9 @@ fn write_item_page(
 	let mut title = wf.create_widget(Label::create)?;
 	title.set_text_static(cstr!("Scan card"));
 	theme.primary_label(&mut title);
-	
+
 	Unipage::try_new_with_rfid_write(
-		vec![
-			(4, *b"ITEM\0\0\0\0\0\0\0\0\0\0\0\0"),
-			(5, item_id.to_ne_bytes()),
-		],
+		vec![(4, ITEM_TYPE), (5, item_id.to_ne_bytes())],
 		default,
 		theme,
 		display,
@@ -456,25 +861,23 @@ fn write_item_page(
 				}
 			});
 			theme.primary_label(&mut label);
-			
-			let mut ok_button =
-				wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
-					let mut label = wf.create_widget(Label::create)?;
-					label.set_text_static(cstr!("Ok"));
-					Ok(())
-				})?;
+
+			let mut ok_button = wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
+				let mut label = wf.create_widget(Label::create)?;
+				label.set_text_static(cstr!("Ok"));
+				Ok(())
+			})?;
 			theme.primary_button(&mut ok_button);
 			ok_button.on_event(|_, e| {
 				if let Event::Clicked = e {
-					// todo right now im just rebooting to get back to the main page
-					unsafe { esp_restart() };
+					display.pop_page();
 				}
 			})?;
-			
+
 			Ok(())
 		}
 	)?;
-	
+
 	Ok(())
 }
 
@@ -486,7 +889,7 @@ fn program_user_page(
 	display: &mut InteractableDisplay
 ) -> LvResult<()> {
 	match packet {
-		Packet::Ok(packet) => {
+		Packet::Ok(_, packet) => {
 			let mut title = wf.create_widget(Label::create)?;
 			title.set_text_static(cstr!("Select user"));
 			theme.primary_label(&mut title);
@@ -552,8 +955,8 @@ fn program_user_page(
 			theme.list(&mut list);
 			list.set_width(percent(100));
 		}
-		Packet::Error(err) => {
-			err_page(err.message.as_str(), wf, theme, display)?;
+		Packet::Error(code, err) => {
+			err_page(code, err.message.as_str(), wf, theme, display)?;
 		}
 	}
 	Ok(())
@@ -567,16 +970,13 @@ fn program_obtained_permanent_token(
 	display: &mut InteractableDisplay
 ) -> LvResult<()> {
 	match packet {
-		Packet::Ok(packet) => {
+		Packet::Ok(_, packet) => {
 			let mut title = wf.create_widget(Label::create)?;
 			title.set_text_static(cstr!("Scan card"));
 			theme.primary_label(&mut title);
 
 			Unipage::try_new_with_rfid_write(
-				vec![
-					(4, *b"USER\0\0\0\0\0\0\0\0\0\0\0\0"),
-					(5, packet.token.to_ne_bytes()),
-				],
+				vec![(4, USER_TYPE), (5, packet.token.to_ne_bytes())],
 				default,
 				theme,
 				display,
@@ -600,8 +1000,7 @@ fn program_obtained_permanent_token(
 					theme.primary_button(&mut ok_button);
 					ok_button.on_event(|_, e| {
 						if let Event::Clicked = e {
-							// todo right now im just rebooting to get back to the main page
-							unsafe { esp_restart() };
+							display.pop_page();
 						}
 					})?;
 
@@ -609,8 +1008,8 @@ fn program_obtained_permanent_token(
 				}
 			)?;
 		}
-		Packet::Error(err) => {
-			err_page(err.message.as_str(), wf, theme, display)?;
+		Packet::Error(code, err) => {
+			err_page(code, err.message.as_str(), wf, theme, display)?;
 		}
 	}
 
