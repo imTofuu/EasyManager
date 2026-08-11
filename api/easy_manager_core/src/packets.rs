@@ -52,6 +52,7 @@ pub mod get {
 		pub name: String,
 		pub item_id: String,
 		pub item_model_id: String,
+		pub borrow_id: Option<String>,
 	}
 
 	#[derive(serde::Serialize, serde::Deserialize)]

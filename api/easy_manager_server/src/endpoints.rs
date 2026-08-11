@@ -1,8 +1,5 @@
 use std::str::FromStr;
 
-use crate::ResponsePacket;
-use crate::entity::prelude::{Borrow, Item, ItemModel, PermanentToken, Session, User};
-use crate::entity::{borrow, item_model, permanent_token, session, user};
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{Error, SaltString};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
@@ -22,14 +19,18 @@ use easy_manager_core::packets::post::{
 };
 use easy_manager_core::packets::{ErrorPacket, Packet};
 use easy_manager_core::{AccountIdentifier, PermissionLevel};
-use migration::Expr;
+use migration::{Expr, IntoCondition, JoinType};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use sea_orm::{
 	ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, InsertResult,
-	IntoActiveModel, NotSet, QueryFilter, Set,
+	IntoActiveModel, NotSet, QueryFilter, QuerySelect, RelationTrait, Set,
 };
 use uuid::Uuid;
+
+use crate::ResponsePacket;
+use crate::entity::prelude::{Borrow, Item, ItemModel, PermanentToken, Session, User};
+use crate::entity::{borrow, item, item_model, permanent_token, session, user};
 
 static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| {
 	Regex::new(r#"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"#)
@@ -251,7 +252,19 @@ pub async fn get_item(
 	state: State<DatabaseConnection>,
 	Path(item_id): Path<Uuid>,
 ) -> (StatusCode, ResponsePacket<GetItemInfoResponse>) {
-	let item_record = match Item::find_by_id(item_id).one(&state.0).await {
+	let (item_record, borrow_record) = match Item::find_by_id(item_id)
+		.join(
+			JoinType::LeftJoin,
+			item::Relation::Borrow.def().on_condition(|_left, right| {
+				Expr::col((right, borrow::Column::Returned))
+					.eq(false)
+					.into_condition()
+			}),
+		)
+		.select_also(Borrow)
+		.one(&state.0)
+		.await
+	{
 		Ok(Some(record)) => record,
 		Ok(None) => {
 			return (
@@ -288,6 +301,7 @@ pub async fn get_item(
 				name: item_record.name,
 				item_id: item_record.item_id.to_string(),
 				item_model_id: item_record.item_model_id.to_string(),
+				borrow_id: borrow_record.map(|record| record.borrow_id.to_string()),
 			},
 		)
 		.into(),
@@ -298,7 +312,19 @@ pub async fn get_item(
 pub async fn get_items(
 	state: State<DatabaseConnection>,
 ) -> (StatusCode, ResponsePacket<GetItemsResponse>) {
-	let items = match Item::find().all(&state.0).await {
+	let items = match Item::find()
+		.join(
+			JoinType::LeftJoin,
+			item::Relation::Borrow.def().on_condition(|_left, right| {
+				Expr::col((right, borrow::Column::Returned))
+					.eq(false)
+					.into_condition()
+			}),
+		)
+		.select_also(Borrow)
+		.all(&state.0)
+		.await
+	{
 		Ok(ok) => ok,
 		Err(err) => {
 			tracing::error!(%err, "Failed to get all items from database");
@@ -317,10 +343,11 @@ pub async fn get_items(
 
 	let items: Box<[GetItemInfoResponse]> = items
 		.into_iter()
-		.map(|item| GetItemInfoResponse {
-			name: item.name,
-			item_id: item.item_id.to_string(),
-			item_model_id: item.item_model_id.to_string(),
+		.map(|(item_record, borrow_record)| GetItemInfoResponse {
+			name: item_record.name,
+			item_id: item_record.item_id.to_string(),
+			item_model_id: item_record.item_model_id.to_string(),
+			borrow_id: borrow_record.map(|record| record.borrow_id.to_string()),
 		})
 		.collect();
 
