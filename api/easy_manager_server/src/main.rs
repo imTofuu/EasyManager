@@ -37,28 +37,33 @@ fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
 		tracing_appender::rolling::daily(exe_path.join("logs"), "easy_manager_server"),
 	);
 
-	let file_layer = tracing_subscriber::fmt::layer()
-		.compact()
-		.with_ansi(false)
-		.with_writer(file_writer)
-		.with_filter(tracing_subscriber::filter::LevelFilter::from_level(
+	let filter = tracing_subscriber::filter::Targets::new()
+		.with_default(tracing_subscriber::filter::LevelFilter::from_level(
+			if cfg!(debug_assertions) {
+				tracing::Level::DEBUG
+			} else {
+				tracing::Level::WARN
+			},
+		))
+		.with_target(
+			"easy_manager_server",
 			if cfg!(debug_assertions) {
 				tracing::Level::DEBUG
 			} else {
 				tracing::Level::INFO
 			},
-		));
+		);
+
+	let file_layer = tracing_subscriber::fmt::layer()
+		.compact()
+		.with_ansi(false)
+		.with_writer(file_writer)
+		.with_filter(filter.clone());
 
 	let cout_layer = tracing_subscriber::fmt::layer()
 		.pretty()
 		.with_ansi(true)
-		.with_filter(tracing_subscriber::filter::Targets::new().with_default(
-			tracing_subscriber::filter::LevelFilter::from_level(if cfg!(debug_assertions) {
-				tracing::Level::DEBUG
-			} else {
-				tracing::Level::INFO
-			}),
-		));
+		.with_filter(filter);
 
 	tracing_subscriber::Registry::default()
 		.with(file_layer)
