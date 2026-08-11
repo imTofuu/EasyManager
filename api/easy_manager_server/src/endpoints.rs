@@ -214,6 +214,44 @@ pub async fn get_logged_in_user(
 	(code, cookie_jar, response)
 }
 
+pub async fn get_item(
+	state: State<DatabaseConnection>,
+	Path(item_id): Path<Uuid>,
+) -> (StatusCode, ResponsePacket<GetItemInfoResponse>) {
+	let item_record = match Item::find_by_id(item_id).one(&state.0).await {
+		Ok(Some(record)) => record,
+		Ok(None) => {
+			return (
+				StatusCode::BAD_REQUEST,
+				Packet::Error(ErrorPacket {
+					message: "Invalid item".to_owned(),
+				})
+				.into(),
+			);
+		}
+		Err(err) => {
+			tracing::error!(%err, "Failed to get item from database");
+			return (
+				StatusCode::INTERNAL_SERVER_ERROR,
+				Packet::Error(ErrorPacket {
+					message: "Something went wrong".to_owned(),
+				})
+				.into(),
+			);
+		}
+	};
+
+	(
+		StatusCode::OK,
+		Packet::Ok(GetItemInfoResponse {
+			name: item_record.name,
+			item_id: item_record.item_id.to_string(),
+			item_model_id: item_record.item_model_id.to_string(),
+		})
+		.into(),
+	)
+}
+
 pub async fn get_items(
 	state: State<DatabaseConnection>,
 ) -> (StatusCode, ResponsePacket<GetItemsResponse>) {
