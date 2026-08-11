@@ -63,6 +63,11 @@ pub mod get {
 	pub struct GetItemsResponse {
 		pub items: Box<[GetItemInfoResponse]>,
 	}
+
+	#[derive(serde::Serialize, serde::Deserialize)]
+	pub struct GetLoggedInUserRequest {
+		pub session: Option<String>,
+	}
 }
 
 pub mod post {

@@ -9,7 +9,8 @@ use axum::{Extension, Json};
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use easy_manager_core::packets::get::{
-	GetItemInfoResponse, GetItemsResponse, GetUserInfoResponse, GetUsersResponse,
+	GetItemInfoResponse, GetItemsResponse, GetLoggedInUserRequest, GetUserInfoResponse,
+	GetUsersResponse,
 };
 use easy_manager_core::packets::post::{
 	CreateItemModelRequest, CreateUserRequest, LoginRequest, LoginResponse,
@@ -145,6 +146,72 @@ pub async fn get_users(
 		StatusCode::OK,
 		Packet::Ok(GetUsersResponse { users }).into(),
 	)
+}
+
+pub async fn get_logged_in_user(
+	state: State<DatabaseConnection>,
+	cookie_jar: CookieJar,
+	Json(get_logged_in_user_request): Json<GetLoggedInUserRequest>,
+) -> (StatusCode, CookieJar, ResponsePacket<GetUserInfoResponse>) {
+	let session = get_logged_in_user_request
+		.session
+		.as_deref()
+		.or(cookie_jar.get("session").map(|cookie| cookie.value()));
+
+	let session_uuid = match session {
+		Some(session) => match Uuid::try_parse(session) {
+			Ok(session_uuid) => session_uuid,
+			Err(_) => {
+				return (
+					StatusCode::BAD_REQUEST,
+					cookie_jar,
+					Packet::Error(ErrorPacket {
+						message: "Malformed session".to_owned(),
+					})
+					.into(),
+				);
+			}
+		},
+		None => {
+			return (
+				StatusCode::BAD_REQUEST,
+				cookie_jar,
+				Packet::Error(ErrorPacket {
+					message: "Missing session id".to_owned(),
+				})
+				.into(),
+			);
+		}
+	};
+
+	let session_model = match Session::find_by_id(session_uuid).one(&state.0).await {
+		Ok(Some(session_model)) => session_model,
+		Ok(None) => {
+			return (
+				StatusCode::BAD_REQUEST,
+				cookie_jar,
+				Packet::Error(ErrorPacket {
+					message: "Invalid session".to_owned(),
+				})
+				.into(),
+			);
+		}
+		Err(err) => {
+			tracing::error!(%err, "Failed to get session from database");
+			return (
+				StatusCode::INTERNAL_SERVER_ERROR,
+				cookie_jar,
+				Packet::Error(ErrorPacket {
+					message: "Something went wrong".to_owned(),
+				})
+				.into(),
+			);
+		}
+	};
+
+	let (code, response) = get_public_user_info(state, Path(session_model.user_id)).await;
+
+	(code, cookie_jar, response)
 }
 
 pub async fn get_items(

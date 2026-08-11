@@ -268,6 +268,10 @@ async fn main() -> Result<(), EasyManagerError> {
 			"/user/{user_id}",
 			method_routing::get(endpoints::get_public_user_info),
 		)
+		.route(
+			"/logged_in_user",
+			method_routing::get(endpoints::get_logged_in_user),
+		)
 		.route("/users", method_routing::get(endpoints::get_users))
 		.route("/items", method_routing::get(endpoints::get_items))
 		.route("/login", method_routing::post(endpoints::login))
