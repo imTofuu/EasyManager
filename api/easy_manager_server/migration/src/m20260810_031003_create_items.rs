@@ -11,6 +11,7 @@ pub enum Item {
 	ItemId,
 	Name,
 	ItemModelId,
+	PermissionLevel,
 }
 
 #[async_trait::async_trait]
@@ -24,6 +25,7 @@ impl MigrationTrait for Migration {
 					.col(ColumnDef::new(Item::ItemId).primary_key().uuid().not_null())
 					.col(ColumnDef::new(Item::Name).string().not_null())
 					.col(ColumnDef::new(Item::ItemModelId).uuid().not_null())
+					.col(ColumnDef::new(Item::PermissionLevel).string())
 					.foreign_key(
 						ForeignKey::create()
 							.name("fk-itemid-itemmodelid")

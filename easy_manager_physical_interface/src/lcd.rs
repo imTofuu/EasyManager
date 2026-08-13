@@ -367,7 +367,10 @@ impl InteractableDisplay {
 	}
 
 	pub fn pop_page<'a>(&mut self) -> Option<Box<Unipage<'a>>> {
-		assert_ne!(self.page_stack.len(), 1, "Attempting to pop main screen");
+		//assert_ne!(self.page_stack.len(), 1, "Attempting to pop main screen");
+		if self.page_stack.len() == 1 {
+			return None;
+		}
 
 		let new_top_screen = unsafe {
 			self.page_stack

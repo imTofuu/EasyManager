@@ -22,13 +22,7 @@ use embedded_svc::http::Method;
 use esp_idf_sys::esp_restart;
 use log::{error, info};
 use lvgl::misc::area::LV_SIZE_CONTENT;
-use lvgl::sys::{
-	LV_STATE_CHECKED,
-	LV_STATE_DISABLED,
-	lv_obj_add_state,
-	lv_obj_has_state,
-	lv_state_t
-};
+use lvgl::sys::{lv_obj_add_flag, lv_obj_add_state, lv_obj_has_state, lv_state_t, LV_STATE_CHECKED, LV_STATE_DISABLED, LV_OBJ_FLAG_CLICKABLE};
 use lvgl::widgets::{Btn, Label, List, Switch};
 use lvgl::{Align, Event, LvResult, NativeObject, Obj, Screen, Widget};
 use uuid::Uuid;
@@ -119,7 +113,7 @@ pub fn main_page(
 	let mut list = wf.create_parent_widget(List::create, theme, |mut wf, theme| {
 		let mut borrow_button = wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
 			let mut label = wf.create_widget(Label::create)?;
-			label.set_text_static(cstr!("Borrow"));
+			label.set_text_static(cstr!("Borrow / Return"));
 			label.set_width(percent(100));
 			Ok(())
 		})?;
@@ -130,6 +124,45 @@ pub fn main_page(
 				match Unipage::try_new(theme, display, borrow_page) {
 					Ok(page) => display.push_page(page),
 					Err(err) => error!("Something went wrong creating the borrowing page ({err})")
+				}
+			}
+		})?;
+
+		let mut view_inventory_button =
+			wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
+				let mut label = wf.create_widget(Label::create)?;
+				label.set_text_static(cstr!("View Inventory"));
+				label.set_width(percent(100));
+				Ok(())
+			})?;
+		theme.secondary_button(&mut view_inventory_button);
+		view_inventory_button.set_width(percent(100));
+		view_inventory_button.on_event(|_, e| {
+			if let Event::Clicked = e {
+				if let Err(err) = Unipage::try_new_with_http(
+					Method::Get,
+					"https://api.easy.drewbryan.org/items".to_string(),
+					None::<()>,
+					vec![],
+					theme,
+					display,
+					view_inventory_page,
+					http_loading_screen
+				) {
+					match Unipage::try_new(theme, display, |wf, theme, display| {
+						err_page(
+							0,
+							format!("Failed to create inventory viewer page ({err:?})").as_str(),
+							wf,
+							theme,
+							display
+						)
+					}) {
+						Ok(page) => display.push_page(page),
+						Err(err) => {
+							error!("Failed to create error page ({err:?})");
+						}
+					}
 				}
 			}
 		})?;
@@ -591,6 +624,73 @@ fn confirm_borrow_page(
 				},
 				http_loading_screen
 			)?;
+		}
+		Packet::Error(code, err) => {
+			err_page(code, err.message.as_str(), wf, theme, display)?;
+		}
+	}
+
+	Ok(())
+}
+
+fn view_inventory_page(
+	packet: Packet<GetItemsResponse>,
+	mut wf: WidgetFactory<Screen>,
+	theme: &'static impl Theme,
+	display: &mut InteractableDisplay
+) -> LvResult<()> {
+	match packet {
+		Packet::Ok(_, packet) => {
+			let mut title = wf.create_widget(Label::create)?;
+			title.set_text_static(cstr!("Inventory"));
+			title.set_width(percent(100));
+			theme.primary_label(&mut title);
+
+			let mut list = wf.create_parent_widget(List::create, theme, |mut wf, theme| {
+				for item in packet.items {
+					let mut container =
+						wf.create_parent_widget(Obj::create, theme, |mut wf, theme| {
+							let mut name = wf.create_widget(Label::create)?;
+							name.set_text(
+								CString::new(item.name)
+									.unwrap_or(cstr!("?").to_owned())
+									.as_c_str()
+							);
+							name.set_align(Align::LeftMid, 0, 0);
+							unsafe {
+								lv_obj_add_flag(name.raw().as_ptr(), LV_OBJ_FLAG_CLICKABLE);
+							}
+
+							let mut state = wf.create_widget(Label::create)?;
+							state.set_text_static(match item.borrow_id {
+								Some(_) => cstr!("Borrowed"),
+								None => cstr!("Available")
+							});
+							state.set_align(Align::RightMid, 0, 0);
+							Ok(())
+						})?;
+					theme.option_container(&mut container);
+					container.set_width(percent(100));
+				}
+
+				Ok(())
+			})?;
+			theme.list(&mut list);
+			list.set_width(percent(100));
+			
+			let mut back_button = wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
+				let mut label = wf.create_widget(Label::create)?;
+				label.set_text_static(cstr!("Back"));
+				label.set_width(percent(100));
+				Ok(())
+			})?;
+			theme.primary_button(&mut back_button);
+			back_button.set_width(percent(100));
+			back_button.on_event(|_, e| {
+				if let Event::Clicked = e {
+					display.pop_page();
+				}
+			})?;
 		}
 		Packet::Error(code, err) => {
 			err_page(code, err.message.as_str(), wf, theme, display)?;

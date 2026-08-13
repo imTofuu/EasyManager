@@ -9,6 +9,7 @@ pub struct Model {
 	pub item_id: Uuid,
 	pub name: String,
 	pub item_model_id: Uuid,
+	pub permission_level: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
