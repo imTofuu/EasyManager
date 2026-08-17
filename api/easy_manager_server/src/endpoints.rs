@@ -9,8 +9,7 @@ use axum::{Extension, Json};
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use easy_manager_core::packets::get::{
-	GetItemInfoResponse, GetItemsResponse, GetLoggedInUserRequest, GetUserInfoResponse,
-	GetUsersResponse,
+	GetItemInfoResponse, GetItemsResponse, GetUserInfoResponse, GetUsersResponse,
 };
 use easy_manager_core::packets::post::{
 	BorrowRequest, CreateItemModelRequest, CreateUserRequest, LoginRequest, LoginResponse,
@@ -172,77 +171,9 @@ pub async fn get_users(
 pub async fn get_logged_in_user(
 	state: State<DatabaseConnection>,
 	cookie_jar: CookieJar,
-	Json(get_logged_in_user_request): Json<GetLoggedInUserRequest>,
+	Extension(session): Extension<session::Model>,
 ) -> (StatusCode, CookieJar, ResponsePacket<GetUserInfoResponse>) {
-	let session = get_logged_in_user_request
-		.session
-		.as_deref()
-		.or(cookie_jar.get("session").map(|cookie| cookie.value()));
-
-	let session_uuid = match session {
-		Some(session) => match Uuid::try_parse(session) {
-			Ok(session_uuid) => session_uuid,
-			Err(_) => {
-				return (
-					StatusCode::BAD_REQUEST,
-					cookie_jar,
-					Packet::Error(
-						StatusCode::BAD_REQUEST.as_u16(),
-						ErrorPacket {
-							message: "Malformed session".to_owned(),
-						},
-					)
-					.into(),
-				);
-			}
-		},
-		None => {
-			return (
-				StatusCode::BAD_REQUEST,
-				cookie_jar,
-				Packet::Error(
-					StatusCode::BAD_REQUEST.as_u16(),
-					ErrorPacket {
-						message: "Missing session id".to_owned(),
-					},
-				)
-				.into(),
-			);
-		}
-	};
-
-	let session_model = match Session::find_by_id(session_uuid).one(&state.0).await {
-		Ok(Some(session_model)) => session_model,
-		Ok(None) => {
-			return (
-				StatusCode::BAD_REQUEST,
-				cookie_jar,
-				Packet::Error(
-					StatusCode::BAD_REQUEST.as_u16(),
-					ErrorPacket {
-						message: "Invalid session".to_owned(),
-					},
-				)
-				.into(),
-			);
-		}
-		Err(err) => {
-			tracing::error!(%err, "Failed to get session from database");
-			return (
-				StatusCode::INTERNAL_SERVER_ERROR,
-				cookie_jar,
-				Packet::Error(
-					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-					ErrorPacket {
-						message: "Something went wrong".to_owned(),
-					},
-				)
-				.into(),
-			);
-		}
-	};
-
-	let (code, response) = get_public_user_info(state, Path(session_model.user_id)).await;
+	let (code, response) = get_public_user_info(state, Path(session.user_id)).await;
 
 	(code, cookie_jar, response)
 }
@@ -293,6 +224,71 @@ pub async fn get_item(
 		}
 	};
 
+	let permission_level = match item_record.permission_level.map(String::try_into) {
+		Some(Ok(level)) => level,
+		Some(Err(_)) => {
+			return (
+				StatusCode::INTERNAL_SERVER_ERROR,
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
+				.into(),
+			);
+		}
+		None => {
+			match ItemModel::find_by_id(item_record.item_model_id)
+				.one(&state.0)
+				.await
+			{
+				Ok(Some(model)) => match model.permission_level.try_into() {
+					Ok(uuid) => uuid,
+					Err(err) => {
+						tracing::error!(%err, "Malformed permission level stored in item model database");
+						return (
+							StatusCode::INTERNAL_SERVER_ERROR,
+							Packet::Error(
+								StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+								ErrorPacket {
+									message: "Something went wrong".to_owned(),
+								},
+							)
+							.into(),
+						);
+					}
+				},
+				Ok(None) => {
+					tracing::error!("Invalid item model id stored in item record");
+					return (
+						StatusCode::INTERNAL_SERVER_ERROR,
+						Packet::Error(
+							StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+							ErrorPacket {
+								message: "Something went wrong".to_owned(),
+							},
+						)
+						.into(),
+					);
+				}
+				Err(err) => {
+					tracing::error!(%err, "Couldn't get item model from database");
+					return (
+						StatusCode::INTERNAL_SERVER_ERROR,
+						Packet::Error(
+							StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+							ErrorPacket {
+								message: "Something went wrong".to_owned(),
+							},
+						)
+						.into(),
+					);
+				}
+			}
+		}
+	};
+
 	(
 		StatusCode::OK,
 		Packet::Ok(
@@ -300,6 +296,7 @@ pub async fn get_item(
 			GetItemInfoResponse {
 				name: item_record.name,
 				item_id: item_record.item_id.to_string(),
+				permission_level,
 				item_model_id: item_record.item_model_id.to_string(),
 				borrow_id: borrow_record.map(|record| record.borrow_id.to_string()),
 			},
@@ -322,6 +319,17 @@ pub async fn get_items(
 			}),
 		)
 		.select_also(Borrow)
+		.join(
+			JoinType::LeftJoin,
+			item::Relation::ItemModel
+				.def()
+				.on_condition(|left, _right| {
+					Expr::col((left, item::Column::PermissionLevel))
+						.is_null()
+						.into_condition()
+				}),
+		)
+		.select_also(ItemModel)
 		.all(&state.0)
 		.await
 	{
@@ -341,15 +349,42 @@ pub async fn get_items(
 		}
 	};
 
-	let items: Box<[GetItemInfoResponse]> = items
+	let items: Box<[GetItemInfoResponse]> = match items
 		.into_iter()
-		.map(|(item_record, borrow_record)| GetItemInfoResponse {
-			name: item_record.name,
-			item_id: item_record.item_id.to_string(),
-			item_model_id: item_record.item_model_id.to_string(),
-			borrow_id: borrow_record.map(|record| record.borrow_id.to_string()),
+		.map(|(item_record, borrow_record, item_model_record)| {
+			let permission_level = match item_record.permission_level.map(String::try_into) {
+				Some(Ok(level)) => level,
+				Some(Err(err)) => return Err(err),
+				None => match item_model_record {
+					Some(record) => record.permission_level.try_into()?,
+					None => return Err("Invalid item model id in item".to_owned()),
+				},
+			};
+			Ok(GetItemInfoResponse {
+				name: item_record.name,
+				item_id: item_record.item_id.to_string(),
+				permission_level,
+				item_model_id: item_record.item_model_id.to_string(),
+				borrow_id: borrow_record.map(|record| record.borrow_id.to_string()),
+			})
 		})
-		.collect();
+		.collect()
+	{
+		Ok(items) => items,
+		Err(err) => {
+			tracing::error!(%err);
+			return (
+				StatusCode::INTERNAL_SERVER_ERROR,
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
+				.into(),
+			);
+		}
+	};
 
 	(
 		StatusCode::OK,
@@ -796,22 +831,50 @@ pub async fn login_using_permanent_token(
 #[tracing::instrument]
 pub async fn obtain_permanent_token(
 	state: State<DatabaseConnection>,
-	Json(obtain_request): Json<ObtainPermanentTokenRequest>,
+	Extension(session): Extension<session::Model>,
+	Json(request): Json<ObtainPermanentTokenRequest>,
 ) -> (StatusCode, ResponsePacket<ObtainPermanentTokenResponse>) {
-	let user_id = match Uuid::from_str(obtain_request.user_id.as_str()) {
-		Ok(user_id) => user_id,
-		Err(_) => {
-			return (
-				StatusCode::BAD_REQUEST,
-				Packet::Error(
-					StatusCode::BAD_REQUEST.as_u16(),
-					ErrorPacket {
-						message: "Invalid user id".to_owned(),
-					},
-				)
-				.into(),
-			);
+	let user_id = match request.user_id {
+		Some(user_id) => {
+			let session_user =
+				match get_public_user_info(state.clone(), Path(session.user_id)).await {
+					(_, ResponsePacket(Packet::Ok(_, session_user))) => session_user,
+					(code, ResponsePacket(Packet::Error(_, error))) => {
+						return (code, Packet::Error(code.as_u16(), error).into());
+					}
+				};
+			if session_user.permission_level >= PermissionLevel::Admin {
+				match Uuid::try_parse(user_id.as_str()) {
+					Ok(uuid) => uuid,
+					Err(err) => {
+						tracing::error!("Passed auth middleware but invalid user id");
+						return (
+							StatusCode::INTERNAL_SERVER_ERROR,
+							Packet::Error(
+								StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+								ErrorPacket {
+									message: "Something went wrong".to_owned(),
+								},
+							)
+							.into(),
+						);
+					}
+				}
+			} else {
+				return (
+					StatusCode::FORBIDDEN,
+					Packet::Error(
+						StatusCode::FORBIDDEN.as_u16(),
+						ErrorPacket {
+							message: "Insufficient permissions to make token for another user"
+								.to_owned(),
+						},
+					)
+					.into(),
+				);
+			}
 		}
+		None => session.user_id,
 	};
 
 	let uuid = Uuid::new_v4();
@@ -867,40 +930,36 @@ pub async fn obtain_permanent_token(
 #[tracing::instrument]
 pub async fn borrow(
 	state: State<DatabaseConnection>,
+	Extension(session): Extension<session::Model>,
 	Json(borrow_request): Json<BorrowRequest>,
 ) -> (StatusCode, ResponsePacket<()>) {
-	let user_id = match Uuid::try_parse(borrow_request.user_id.as_str()) {
-		Ok(user_id) => user_id,
-		Err(_) => {
+	let user = match get_public_user_info(state.clone(), Path(session.user_id.clone())).await {
+		(_, ResponsePacket(Packet::Ok(_, user))) => user,
+		(StatusCode::INTERNAL_SERVER_ERROR, ResponsePacket(Packet::Error(..))) => {
+			return (
+				StatusCode::INTERNAL_SERVER_ERROR,
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Something went wrong".to_owned(),
+					},
+				)
+				.into(),
+			);
+		}
+		(_, ResponsePacket(Packet::Error(..))) => {
 			return (
 				StatusCode::BAD_REQUEST,
 				Packet::Error(
 					StatusCode::BAD_REQUEST.as_u16(),
 					ErrorPacket {
-						message: "Malformed user id".to_owned(),
+						message: "Invalid user id".to_owned(),
 					},
 				)
 				.into(),
 			);
 		}
 	};
-
-	if let Packet::Error(..) = get_public_user_info(state.clone(), Path(user_id.clone()))
-		.await
-		.1
-		.0
-	{
-		return (
-			StatusCode::BAD_REQUEST,
-			Packet::Error(
-				StatusCode::BAD_REQUEST.as_u16(),
-				ErrorPacket {
-					message: "Invalid user id".to_owned(),
-				},
-			)
-			.into(),
-		);
-	}
 
 	let item_id = match Uuid::try_parse(borrow_request.item_id.as_str()) {
 		Ok(item_id) => item_id,
@@ -918,22 +977,38 @@ pub async fn borrow(
 		}
 	};
 
-	if let Packet::Error(..) = get_item(state.clone(), Path(item_id.clone())).await.1.0 {
-		return (
-			StatusCode::BAD_REQUEST,
-			Packet::Error(
-				StatusCode::BAD_REQUEST.as_u16(),
-				ErrorPacket {
-					message: "Invalid item id".to_owned(),
-				},
-			)
-			.into(),
-		);
+	match get_item(state.clone(), Path(item_id.clone())).await.1.0 {
+		Packet::Ok(_, packet) => {
+			if packet.permission_level > user.permission_level {
+				return (
+					StatusCode::FORBIDDEN,
+					Packet::Error(
+						StatusCode::FORBIDDEN.as_u16(),
+						ErrorPacket {
+							message: "Insufficient permissions".to_owned(),
+						},
+					)
+					.into(),
+				);
+			}
+		}
+		Packet::Error(..) => {
+			return (
+				StatusCode::BAD_REQUEST,
+				Packet::Error(
+					StatusCode::BAD_REQUEST.as_u16(),
+					ErrorPacket {
+						message: "Invalid item id".to_owned(),
+					},
+				)
+				.into(),
+			);
+		}
 	}
 
 	let active_model = borrow::ActiveModel {
 		borrow_id: Set(Uuid::new_v4()),
-		user_id: Set(user_id),
+		user_id: Set(session.user_id),
 		item_id: Set(item_id),
 		created_at: NotSet,
 		returned: NotSet,

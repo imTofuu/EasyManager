@@ -51,6 +51,7 @@ pub mod get {
 	pub struct GetItemInfoResponse {
 		pub name: String,
 		pub item_id: String,
+		pub permission_level: PermissionLevel,
 		pub item_model_id: String,
 		pub borrow_id: Option<String>,
 	}
@@ -63,11 +64,6 @@ pub mod get {
 	#[derive(serde::Serialize, serde::Deserialize)]
 	pub struct GetItemsResponse {
 		pub items: Box<[GetItemInfoResponse]>,
-	}
-
-	#[derive(Debug, serde::Serialize, serde::Deserialize)]
-	pub struct GetLoggedInUserRequest {
-		pub session: Option<String>,
 	}
 }
 
@@ -106,7 +102,7 @@ pub mod post {
 
 	#[derive(Debug, serde::Serialize, serde::Deserialize)]
 	pub struct ObtainPermanentTokenRequest {
-		pub user_id: String,
+		pub user_id: Option<String>,
 	}
 
 	#[derive(serde::Serialize, serde::Deserialize)]
@@ -122,7 +118,6 @@ pub mod post {
 	#[derive(Debug, serde::Serialize, serde::Deserialize)]
 	pub struct BorrowRequest {
 		pub item_id: String,
-		pub user_id: String,
 	}
 
 	#[derive(Debug, serde::Serialize, serde::Deserialize)]

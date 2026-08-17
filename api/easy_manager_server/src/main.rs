@@ -45,14 +45,14 @@ fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
 				tracing::Level::WARN
 			},
 		))
-		.with_target(
+		/*.with_target(
 			"easy_manager_server",
 			if cfg!(debug_assertions) {
 				tracing::Level::DEBUG
 			} else {
 				tracing::Level::INFO
 			},
-		);
+		)*/;
 
 	let file_layer = tracing_subscriber::fmt::layer()
 		.compact()
@@ -273,6 +273,15 @@ async fn main() -> Result<(), EasyManagerError> {
 	let auth_router: Router = Router::new()
 		.route("/model", method_routing::post(endpoints::create_item_model))
 		.route("/user", method_routing::post(endpoints::create_user))
+		.route(
+			"/logged_in_user",
+			method_routing::get(endpoints::get_logged_in_user),
+		)
+		.route(
+			"/obtain_permanent_token",
+			method_routing::post(endpoints::obtain_permanent_token),
+		)
+		.route("/borrow", method_routing::post(endpoints::borrow))
 		.layer(middleware::from_fn_with_state(
 			db_connection.clone(),
 			auth_middleware,
@@ -285,10 +294,6 @@ async fn main() -> Result<(), EasyManagerError> {
 			"/user/{user_id}",
 			method_routing::get(endpoints::get_public_user_info),
 		)
-		.route(
-			"/logged_in_user",
-			method_routing::get(endpoints::get_logged_in_user),
-		)
 		.route("/users", method_routing::get(endpoints::get_users))
 		.route("/item/{item_id}", method_routing::get(endpoints::get_item))
 		.route("/items", method_routing::get(endpoints::get_items))
@@ -298,11 +303,6 @@ async fn main() -> Result<(), EasyManagerError> {
 			method_routing::post(endpoints::login_using_permanent_token),
 		)
 		.route("/logout", method_routing::post(endpoints::logout))
-		.route(
-			"/obtain_permanent_token",
-			method_routing::post(endpoints::obtain_permanent_token),
-		)
-		.route("/borrow", method_routing::post(endpoints::borrow))
 		.route("/return", method_routing::post(endpoints::return_item))
 		.with_state(db_connection.clone());
 
