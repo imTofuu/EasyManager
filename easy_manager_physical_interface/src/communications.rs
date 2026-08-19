@@ -32,13 +32,16 @@ use mfrc522::comm::blocking::spi::{DummyDelay, SpiInterface};
 use mfrc522::{Error, Initialized, Mfrc522, MifareKey, Uid};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use uuid::Uuid;
 
 use crate::lcd::InteractableDisplay;
 use crate::uart_read_line;
 
-pub type HttpWorkResult = Result<(u16, Vec<u8>), ErrorPacket>;
-pub type HttpWork = dyn FnOnce(&mut Client<EspHttpConnection>) -> HttpWorkResult + Send;
-pub type HttpPromiseClosure = dyn FnOnce(HttpWorkResult, &mut InteractableDisplay);
+pub type HttpWorkResult = Result<(u16, Option<Option<Uuid>>, Vec<u8>), ErrorPacket>;
+pub type HttpWork =
+	dyn FnOnce(&mut Client<EspHttpConnection>, &Option<Uuid>) -> HttpWorkResult + Send;
+pub type HttpPromiseClosure =
+	dyn FnOnce(Result<(u16, Vec<u8>), ErrorPacket>, &mut InteractableDisplay);
 
 pub struct HttpPromise {
 	pub work: Box<HttpWork>,
@@ -55,7 +58,9 @@ impl HttpPromise {
 	) -> Self {
 		Self {
 			work: Box::new(
-				move |http: &mut Client<EspHttpConnection>| -> HttpWorkResult {
+				move |http: &mut Client<EspHttpConnection>,
+				      session_id: &Option<Uuid>|
+				      -> HttpWorkResult {
 					let body_json = match body {
 						Some(body) => {
 							let mut serializer = serde_json::Serializer::new(Vec::new());
@@ -71,6 +76,15 @@ impl HttpPromise {
 
 					headers.extend_from_slice(&[
 						(CLIENT_VERSION_HN.into(), get_core_version().into()),
+						(
+							"Cookie".into(),
+							format!(
+								"session={}",
+								session_id
+									.map(|session_id| session_id.to_string())
+									.unwrap_or("".to_string())
+							)
+						),
 						("Content-Type".into(), "application/json".into()),
 						("Content-Length".into(), body_json.len().to_string())
 					]);
@@ -115,11 +129,7 @@ impl HttpPromise {
 								}
 							}
 						}
-						None => {
-							return Err(ErrorPacket {
-								message: "Missing header: Content-Length".to_string()
-							});
-						}
+						None => 0
 					};
 
 					let mut buf = vec![0u8; buffer_size];
@@ -129,19 +139,50 @@ impl HttpPromise {
 						});
 					}
 
-					Ok((res.status(), buf))
+					let session_id = res
+						.header("set-cookie")
+						.and_then(|str| {
+							let session_set_start = str.find("session")?;
+							Some(&str[session_set_start..])
+						})
+						.map(|str| {
+							let session_id_start = str.find('=').ok_or("Malformed session id")? + 1;
+							let str = &str[session_id_start..];
+							let session_id_end = str.find(';').ok_or("Malformed session id")?;
+							Ok(if session_id_end == 0 {
+								None
+							} else {
+								Some(
+									Uuid::try_parse(&str[..session_id_end])
+										.map_err(|_| "Failed to parse uuid")?
+								)
+							})
+						})
+						.transpose()
+						.map_err(|msg: &str| {
+							ErrorPacket {
+								message: msg.to_string()
+							}
+						})?
+						.or_else(|| Some(session_id.clone()));
+
+					Ok((res.status(), session_id, buf))
 				}
 			),
 			done: Box::new(|data_result, display| {
 				let packet = match data_result {
 					Ok((code, data)) => {
-						match serde_json::from_slice(data.as_slice()) {
-							Ok(packet) => packet,
-							Err(err) => {
-								Packet::Error(code, ErrorPacket {
-									message: format!("Failed to parse error packet: {err}")
-								})
+						if data.len() > 0 {
+							match serde_json::from_slice(data.as_slice()) {
+								Ok(packet) => packet,
+								Err(err) => {
+									Packet::Error(code, ErrorPacket {
+										message: format!("Failed to parse error packet: {err}")
+									})
+								}
 							}
+						} else {
+							Packet::None(200)
 						}
 					}
 					Err(err) => Packet::Error(0, err)

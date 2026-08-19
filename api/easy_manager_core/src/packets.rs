@@ -31,6 +31,7 @@ pub struct ErrorPacket {
 #[derive(serde::Serialize, Deserialize)]
 pub enum Packet<T> {
 	Ok(u16, T),
+	None(u16),
 	Error(u16, ErrorPacket),
 }
 

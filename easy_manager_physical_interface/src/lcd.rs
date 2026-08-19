@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use arrayvec::ArrayVec;
+use easy_manager_core::packets::ErrorPacket;
 use embassy_time::Timer;
 use embedded_sdmmc::{BlockDevice, File, TimeSource, Timestamp};
 use embedded_svc::http::client::Client;
@@ -67,9 +68,9 @@ use lvgl::sys::{
 use lvgl::{Display, DrawBuffer};
 use mfrc522::{MifareKey, Uid};
 
-use crate::communications::{HttpPromise, HttpWork, HttpWorkResult, RfidPromise, RfidReader};
+use crate::communications::{HttpPromise, HttpWork, RfidPromise, RfidReader};
 use crate::graphics::{ModernTheme, Unipage};
-use crate::pages::main_page;
+use crate::pages::home_page;
 
 pub struct SPIPinDriver<'d, MODE>(PinDriver<'d, MODE>);
 
@@ -389,10 +390,12 @@ impl InteractableDisplay {
 fn request_fulfiller(
 	http_config: Configuration,
 	req: Arc<Mutex<Option<Box<HttpWork>>>>,
-	res: Arc<Mutex<Option<HttpWorkResult>>>
+	res: Arc<Mutex<Option<Result<(u16, Vec<u8>), ErrorPacket>>>>
 ) {
 	let mut http =
 		Client::wrap(EspHttpConnection::new(&http_config).expect("Failed to create HTTP client"));
+
+	let mut session_id = None;
 
 	loop {
 		sleep(Duration::from_millis(100));
@@ -401,7 +404,13 @@ fn request_fulfiller(
 		}
 		let req = req.lock().unwrap().take();
 		if let Some(req) = req {
-			let data = req.call_once((&mut http,));
+			let data = req.call_once((&mut http, &session_id));
+			let data = data.map(|(code, session, data)| {
+				if let Some(new_session) = session {
+					session_id = new_session;
+				}
+				(code, data)
+			});
 			*res.lock().unwrap() = Some(data);
 		}
 	}
@@ -445,7 +454,7 @@ pub async fn run_lcd(
 	let mut rfid = RfidReader::new(rfid_spi, Some(rfid_cs), key_cb).unwrap();
 
 	// Create main page
-	let page = Unipage::try_new(theme, display, main_page).expect("Failed to create main page");
+	let page = Unipage::try_new(theme, display, home_page).expect("Failed to make main page");
 
 	display.push_page(page);
 

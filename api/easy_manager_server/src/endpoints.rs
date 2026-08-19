@@ -425,6 +425,19 @@ pub async fn create_item_model(
 				Packet::Error(code, err).into(),
 			);
 		}
+		Packet::None(code) => {
+			return (
+				get_user_info_status_code,
+				cookie_jar,
+				Packet::Error(
+					code,
+					ErrorPacket {
+						message: "Unexpected none packet".to_owned(),
+					},
+				)
+				.into(),
+			);
+		}
 	}
 
 	if let Err(err) = ItemModel::insert(item_model::ActiveModel {
@@ -554,6 +567,18 @@ pub async fn create_user(
 			}
 		}
 		Packet::Error(code, err) => return (status_code, Packet::Error(code, err).into()),
+		Packet::None(code) => {
+			return (
+				status_code,
+				Packet::Error(
+					code,
+					ErrorPacket {
+						message: "Unexpected none packet".to_owned(),
+					},
+				)
+				.into(),
+			);
+		}
 	}
 
 	create_user_unchecked(&state.0, create_user_request).await
@@ -842,6 +867,18 @@ pub async fn obtain_permanent_token(
 					(code, ResponsePacket(Packet::Error(_, error))) => {
 						return (code, Packet::Error(code.as_u16(), error).into());
 					}
+					(code, ResponsePacket(Packet::None(_))) => {
+						return (
+							code,
+							Packet::Error(
+								code.as_u16(),
+								ErrorPacket {
+									message: "Unexpected none packet".to_owned(),
+								},
+							)
+							.into(),
+						);
+					}
 				};
 			if session_user.permission_level >= PermissionLevel::Admin {
 				match Uuid::try_parse(user_id.as_str()) {
@@ -959,6 +996,18 @@ pub async fn borrow(
 				.into(),
 			);
 		}
+		(code, ResponsePacket(Packet::None(_))) => {
+			return (
+				code,
+				Packet::Error(
+					code.as_u16(),
+					ErrorPacket {
+						message: "Unexpected none packet".to_owned(),
+					},
+				)
+				.into(),
+			);
+		}
 	};
 
 	let item_id = match Uuid::try_parse(borrow_request.item_id.as_str()) {
@@ -999,6 +1048,18 @@ pub async fn borrow(
 					StatusCode::BAD_REQUEST.as_u16(),
 					ErrorPacket {
 						message: "Invalid item id".to_owned(),
+					},
+				)
+				.into(),
+			);
+		}
+		Packet::None(_) => {
+			return (
+				StatusCode::INTERNAL_SERVER_ERROR,
+				Packet::Error(
+					StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+					ErrorPacket {
+						message: "Unexpected none packet".to_owned(),
 					},
 				)
 				.into(),

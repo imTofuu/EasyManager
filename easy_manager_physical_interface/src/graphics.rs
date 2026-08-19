@@ -161,6 +161,8 @@ impl<'a> Unipage<'a> {
 			body,
 			headers,
 			move |packet: Packet<R>, closure_display| {
+				closure_display.pop_page();
+				closure_display.pop_page();
 				let page = match Self::try_new(theme, closure_display, |wf, thm, inner_display| {
 					init(packet, wf, thm, inner_display)?;
 					Ok(())
@@ -171,8 +173,6 @@ impl<'a> Unipage<'a> {
 						return;
 					}
 				};
-				closure_display.pop_page();
-				closure_display.pop_page();
 				closure_display.push_page(page);
 			}
 		);
@@ -196,6 +196,7 @@ impl<'a> Unipage<'a> {
 		let promise = RfidPromise::read(
 			blocks,
 			Box::new(move |data, display| {
+				display.pop_page();
 				let page = match Self::try_new(theme, display, |wf, theme, display| {
 					init(data, wf, theme, display)?;
 					Ok(())
@@ -206,7 +207,6 @@ impl<'a> Unipage<'a> {
 						return;
 					}
 				};
-				display.pop_page();
 				display.push_page(page);
 			})
 		);
