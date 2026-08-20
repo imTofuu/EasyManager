@@ -1,0 +1,126 @@
+#@name create_user
+POST 127.0.0.1:3000/user
+client-version: 0.1.0
+Content-Type: application/json
+
+{
+  "email": "example@gmail.com",
+  "username": "user",
+  "password": "password",
+  "permission_level": "default"
+}
+
+###
+
+#@name login
+POST 127.0.0.1:3000/login
+client-version: 0.1.0
+Content-Type: application/json
+
+{
+  "account_identifier": {"username": "user" },
+  "password": "password"
+}
+
+###
+
+#@name login_root
+POST 127.0.0.1:3000/login
+client-version: 0.1.0
+Content-Type: application/json
+
+{
+  "account_identifier": {"username":  "admin"},
+  "password": "admin"
+}
+
+###
+
+#@name logout
+POST 127.0.0.1:3000/logout
+client-version: 0.1.0
+
+###
+
+#@name create_model
+POST 127.0.0.1:3000/model
+client-version: 0.1.0
+Content-Type: application/json
+
+{
+  "name": "Example Model",
+  "description": "Example Description",
+  "permission_level": "default"
+}
+
+###
+
+#@name obtain_permanent_token
+POST 127.0.0.1:3000/obtain_permanent_token
+client-version: 0.1.0
+Content-Type: application/json
+
+{
+  "user_id": "4e9cd903-27db-496d-88a0-bff6f92dcc71"
+}
+
+###
+
+#@name login_using_perm_token
+POST 127.0.0.1:3000/login_using_perm_token
+client-version: 0.1.0
+Content-Type: application/json
+
+{
+  "token": 113642694711538703074461587811715557693
+}
+
+###
+
+#@name logged_in_user
+GET 127.0.0.1:3000/logged_in_user
+client-version: 0.1.0
+Content-Type: application/json
+
+{
+  "session": "8ecb17ab-f480-4599-b94d-0bf7ae8d3de2"
+}
+
+###
+
+#@name borrow_item
+POST 127.0.0.1:3000/borrow
+client-version: 0.1.0
+Content-Type: application/json
+
+{
+  "item_id": "a2b3baeb-2685-4294-a8e5-4c6fe1e64dac"
+}
+
+###
+
+#@name return
+POST 127.0.0.1:3000/return
+client-version: 0.1.0
+Content-Type: application/json
+
+{
+  "item_id": "3d2fbfef-41ef-4caf-b33a-0d8bdecaba1a"
+}
+
+###
+
+#@name get_item
+GET 127.0.0.1:3000/item/a1ba921f-8f39-4911-87bd-a59c2e152d79
+client-version: 0.1.0
+
+###
+
+#@name get_items
+GET 127.0.0.1:3000/items
+client-version: 0.1.0
+
+###
+
+#@name ping
+GET 127.0.0.1:3000/ping
