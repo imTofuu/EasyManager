@@ -392,13 +392,15 @@ fn request_fulfiller(
 	req: Arc<Mutex<Option<Box<HttpWork>>>>,
 	res: Arc<Mutex<Option<Result<(u16, Vec<u8>), ErrorPacket>>>>
 ) {
-	let mut http =
-		Client::wrap(EspHttpConnection::new(&http_config).expect("Failed to create HTTP client"));
 
 	let mut session_id = None;
 
 	loop {
 		sleep(Duration::from_millis(100));
+		
+		let mut http =
+			Client::wrap(EspHttpConnection::new(&http_config).expect("Failed to create HTTP client"));
+		
 		if res.lock().unwrap().is_some() {
 			continue;
 		}
