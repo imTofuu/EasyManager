@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 use std::ffi::{c_int, c_void};
 use std::io::Read;
 use std::mem::transmute;
-use std::sync::atomic::{AtomicI16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::sleep;
@@ -48,10 +47,7 @@ use esp_idf_sys::{
 	esp_lcd_spi_bus_handle_t,
 	gpio_num_t,
 	lcd_rgb_data_endian_t_LCD_RGB_DATA_ENDIAN_LITTLE,
-	lcd_rgb_element_order_t_LCD_RGB_ELEMENT_ORDER_BGR,
-	st7796_lcd_init_cmd_t,
-	st7796_vendor_config_t
-};
+	lcd_rgb_element_order_t_LCD_RGB_ELEMENT_ORDER_BGR};
 use log::{debug, error, info};
 use lvgl::sys::{
 	_lv_indev_drv_t,
@@ -171,9 +167,8 @@ impl InteractableDisplay {
 			.unwrap_or_else(|err| panic!("Failed to make rotary encoder SW pin driver ({err})"));
 
 		let sw_id = sw.pin();
-
-		let perma_count = Arc::new(AtomicI16::new(0));
-		let isr_perma_count = perma_count.clone();
+		
+		// Make encoder interrupts
 		unsafe {
 			clk.subscribe(move || {
 				let level = match dt.get_level() {
@@ -181,7 +176,6 @@ impl InteractableDisplay {
 					Level::Low => 1
 				};
 				ENCODER_STATE.diff += level;
-				isr_perma_count.fetch_add(level, Ordering::Relaxed);
 			})
 			.context("failed to add rotary encoder CLK interrupt")?;
 
@@ -218,53 +212,10 @@ impl InteractableDisplay {
 			..Default::default()
 		};
 
-		static CSCON_UNLOCK_1: [u8; 1] = [0xc3];
-		static CSCON_UNLOCK_2: [u8; 1] = [0x96];
-		static PGAMCTRL: [u8; 14] = [
-			0xf0, 0x09, 0x13, 0x12, 0x12, 0x2b, 0x3c, 0x44, 0x4b, 0x1b, 0x18, 0x17, 0x1d, 0x21
-		];
-		static NGAMCTRL: [u8; 14] = [
-			0xf0, 0x09, 0x13, 0x0c, 0x0d, 0x27, 0x3b, 0x44, 0x4d, 0x0b, 0x17, 0x17, 0x1d, 0x21
-		];
-
-		let init_cmds: [st7796_lcd_init_cmd_t; 4] = [
-			st7796_lcd_init_cmd_t {
-				cmd:        0xf0,
-				data:       CSCON_UNLOCK_1.as_ptr() as *const c_void,
-				data_bytes: CSCON_UNLOCK_1.len(),
-				delay_ms:   0
-			},
-			st7796_lcd_init_cmd_t {
-				cmd:        0xf0,
-				data:       CSCON_UNLOCK_2.as_ptr() as *const c_void,
-				data_bytes: CSCON_UNLOCK_2.len(),
-				delay_ms:   0
-			},
-			st7796_lcd_init_cmd_t {
-				cmd:        0xe0,
-				data:       PGAMCTRL.as_ptr() as *const c_void,
-				data_bytes: PGAMCTRL.len(),
-				delay_ms:   0
-			},
-			st7796_lcd_init_cmd_t {
-				cmd:        0xe1,
-				data:       NGAMCTRL.as_ptr() as *const c_void,
-				data_bytes: NGAMCTRL.len(),
-				delay_ms:   0
-			}
-		];
-
-		let mut vendor_config = st7796_vendor_config_t {
-			init_cmds: init_cmds.as_ptr(),
-			init_cmds_size: init_cmds.len() as u16,
-			..Default::default()
-		};
-
 		let panel_dev_config = esp_lcd_panel_dev_config_t {
 			reset_gpio_num: rst.pin() as c_int,
 			data_endian: lcd_rgb_data_endian_t_LCD_RGB_DATA_ENDIAN_LITTLE,
 			bits_per_pixel: 16,
-			vendor_config: &mut vendor_config as *mut st7796_vendor_config_t as *mut c_void,
 			__bindgen_anon_1: esp_lcd_panel_dev_config_t__bindgen_ty_1 {
 				rgb_ele_order: lcd_rgb_element_order_t_LCD_RGB_ELEMENT_ORDER_BGR
 			},
@@ -274,6 +225,7 @@ impl InteractableDisplay {
 		let mut io_handle = esp_lcd_panel_io_handle_t::default();
 		let mut panel_handle = esp_lcd_panel_handle_t::default();
 
+		// Create and initialise the LCD interface
 		unsafe {
 			esp!(esp_lcd_new_panel_io_spi(
 				spi.host() as esp_lcd_spi_bus_handle_t,
@@ -297,6 +249,7 @@ impl InteractableDisplay {
 
 		debug!("Initialised LCD");
 
+		// Allocate LCD framebuffer memory and make LVGL draw adapter
 		let draw_buffer = DrawBuffer::<{ 320 * 10 }>::default();
 		let lvgl_display = Display::register(draw_buffer, 320, 480, move |refresh| {
 			esp!(unsafe {
@@ -311,8 +264,9 @@ impl InteractableDisplay {
 			})
 			.unwrap_or_else(|err| error!("Failed to draw bitmap ({err})"));
 		})
-		.context("failed to create LVGL _display")?;
+		.context("failed to create LVGL display")?;
 
+		// Make LVGL input device
 		let encoder = Box::leak(Box::new(_lv_indev_drv_t::default()));
 		unsafe { lvgl::sys::lv_indev_drv_init(encoder) };
 		encoder.type_ = lvgl::sys::lv_indev_type_t_LV_INDEV_TYPE_ENCODER;
@@ -387,25 +341,28 @@ impl InteractableDisplay {
 	}
 }
 
+// This is the function the fulfiller thread is on to do HTTP requests
 fn request_fulfiller(
 	http_config: Configuration,
 	req: Arc<Mutex<Option<Box<HttpWork>>>>,
 	res: Arc<Mutex<Option<Result<(u16, Vec<u8>), ErrorPacket>>>>
 ) {
-
 	let mut session_id = None;
 
 	loop {
 		sleep(Duration::from_millis(100));
-		
-		let mut http =
-			Client::wrap(EspHttpConnection::new(&http_config).expect("Failed to create HTTP client"));
-		
+
+		// Wait for old request to be taken
 		if res.lock().unwrap().is_some() {
 			continue;
 		}
+		
 		let req = req.lock().unwrap().take();
 		if let Some(req) = req {
+			let mut http = Client::wrap(
+				EspHttpConnection::new(&http_config).expect("Failed to create HTTP client")
+			);
+			// Do HTTP work and update session id if needed
 			let data = req.call_once((&mut http, &session_id));
 			let data = data.map(|(code, session, data)| {
 				if let Some(new_session) = session {
@@ -413,6 +370,8 @@ fn request_fulfiller(
 				}
 				(code, data)
 			});
+			
+			// Put response
 			*res.lock().unwrap() = Some(data);
 		}
 	}
@@ -434,13 +393,18 @@ pub async fn run_lcd(
 	info!("Running LCD");
 	lvgl::init();
 
+	// Keep theme alive forever in the same memory location. This allows me to copy
+	// local references and have them stay valid
 	let theme = Box::leak(Box::new(ModernTheme::new()));
 
+	// Same with the display
 	let mut display = Box::leak(Box::new(
 		InteractableDisplay::new(&lcd_spi, lcd_cs, dc, rst, enc_clk, enc_dt, enc_sw)
 			.unwrap_or_else(|err| panic!("Failed to create LCD ({err})"))
 	));
 
+	// Create the "slots" that the fulfiller thread will use to return data and know
+	// when and how to make requests
 	let mut current_request_done = None;
 	let http_request = Arc::new(Mutex::new(None));
 	let http_response = Arc::new(Mutex::new(None));
@@ -452,6 +416,8 @@ pub async fn run_lcd(
 		.spawn(move || request_fulfiller(http_config, fulfiller_request, fulfiller_response))
 		.expect("Failed to create HTTP request fulfiller thread");
 
+	// Make the RFID reader. This doesn't need a separate thread like WiFi because
+	// it doesn't block to read and it is nearly instant
 	let key_cb: Box<dyn Fn(&Uid, u8) -> MifareKey> = Box::new(|_uid, _block| [0xffu8; 6]);
 	let mut rfid = RfidReader::new(rfid_spi, Some(rfid_cs), key_cb).unwrap();
 
@@ -468,6 +434,7 @@ pub async fn run_lcd(
 		let mut rfid_data = None;
 		let mut rfid_wrote = Ok(false);
 
+		// Do RFID work without taking
 		match &display.rfid_promise {
 			Some(RfidPromise::Read(work, _)) => {
 				if let Some(data) = work.call((&mut rfid,)).transpose() {
@@ -480,6 +447,7 @@ pub async fn run_lcd(
 			None => {}
 		}
 
+		// Only take if data was actually read and call promise
 		if let Some(data) = rfid_data {
 			match display.rfid_promise.take() {
 				Some(RfidPromise::Read(_, promise)) => promise.call_once((data, &mut display)),
@@ -489,6 +457,7 @@ pub async fn run_lcd(
 			}
 		}
 
+		// Only take if data was written or had an error
 		if let result @ Ok(true) | result @ Err(_) = rfid_wrote {
 			match display.rfid_promise.take() {
 				Some(RfidPromise::Write(_, promise)) => {
@@ -500,6 +469,7 @@ pub async fn run_lcd(
 			}
 		}
 
+		// Tell the fulfiller to do another request if it isn't busy
 		if current_request_done.is_none() {
 			if let Some(HttpPromise { work, done }) = display.http_promises.pop_front() {
 				current_request_done = Some(done);
@@ -507,21 +477,21 @@ pub async fn run_lcd(
 			}
 		}
 
-		{
-			if let Some(res) = http_response.lock().unwrap().take() {
-				*http_request.lock().unwrap() = None;
-				match current_request_done.take() {
-					Some(promise) => {
-						promise.call_once((res, display));
-					}
-					None => {
-						error!("HTTP response with no request");
-						debug_assert!(false);
-					}
+		// Call promise if request is done
+		if let Some(res) = http_response.lock().unwrap().take() {
+			*http_request.lock().unwrap() = None;
+			match current_request_done.take() {
+				Some(promise) => {
+					promise.call_once((res, display));
+				}
+				None => {
+					error!("HTTP response with no request");
+					debug_assert!(false);
 				}
 			}
 		}
 
+		// Step LVGL
 		lvgl::task_handler();
 
 		if let Err(err) = display.enc_clk.enable_interrupt() {
@@ -531,6 +501,7 @@ pub async fn run_lcd(
 			error!("Failed to enable encoder button interrupt ({err})");
 		}
 
+		// Tell LVGL how long the update took
 		let now = Instant::now();
 		lvgl::tick_inc(now - last);
 		last = now;

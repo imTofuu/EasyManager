@@ -96,6 +96,7 @@ async fn auth_middleware(
 	mut req: Request<Body>,
 	next: Next,
 ) -> Response<Body> {
+	// Get session id or logout on error
 	let session_id: Uuid = match cookie_jar.get("session") {
 		Some(session_id) => match Uuid::from_str(session_id.value()) {
 			Ok(session_id) => session_id,
@@ -129,6 +130,7 @@ async fn auth_middleware(
 		}
 	};
 
+	// Log out if session is expired
 	let session = match Session::find_by_id(session_id).one(&state.0).await {
 		Ok(session) => match session {
 			Some(session) => {
@@ -178,7 +180,9 @@ async fn auth_middleware(
 				.into_response();
 		}
 	};
+	// Pass the session to the endpoint as an extension
 	req.extensions_mut().insert(session);
+	
 	next.run(req).await
 }
 

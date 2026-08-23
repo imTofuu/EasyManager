@@ -61,6 +61,8 @@ impl HttpPromise {
 				move |http: &mut Client<EspHttpConnection>,
 				      session_id: &Option<Uuid>|
 				      -> HttpWorkResult {
+					
+					// Serialise body
 					let body_json = match body {
 						Some(body) => {
 							let mut serializer = serde_json::Serializer::new(Vec::new());
@@ -74,6 +76,7 @@ impl HttpPromise {
 						None => Vec::new()
 					};
 
+					// Add default headers to user headers
 					headers.extend_from_slice(&[
 						(CLIENT_VERSION_HN.into(), get_core_version().into()),
 						(
@@ -92,6 +95,7 @@ impl HttpPromise {
 						.iter()
 						.map(|(k, v)| (k.as_str(), v.as_str()))
 						.collect();
+					
 					let mut req = match http.request(method, uri.as_str(), hdrs.as_slice()) {
 						Ok(req) => req,
 						Err(err) => {
@@ -107,6 +111,7 @@ impl HttpPromise {
 						});
 					}
 
+					// Make request
 					let mut res = match req.submit() {
 						Ok(res) => res,
 						Err(err) => {
@@ -132,6 +137,7 @@ impl HttpPromise {
 						None => 0
 					};
 
+					// Read response body
 					let mut buf = vec![0u8; buffer_size];
 					if let Err(err) = res.read_exact(buf.as_mut_slice()) {
 						return Err(ErrorPacket {
@@ -139,6 +145,7 @@ impl HttpPromise {
 						});
 					}
 
+					// Parse new session id if it was returned
 					let session_id = res
 						.header("set-cookie")
 						.and_then(|str| {
@@ -172,6 +179,7 @@ impl HttpPromise {
 			done: Box::new(|data_result, display| {
 				let packet = match data_result {
 					Ok((code, data)) => {
+						// Serialise packet
 						if data.len() > 0 {
 							match serde_json::from_slice(data.as_slice()) {
 								Ok(packet) => packet,
@@ -300,7 +308,7 @@ impl<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> MifareKey> RfidRead
 
 		for (block, data) in data {
 			if block % 4 == 3 {
-				todo!("trying to write to trailer block. error not yet implemented")
+				panic!("trying to write to trailer block")
 			}
 
 			if default {
@@ -333,6 +341,7 @@ impl<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> MifareKey> RfidRead
 	}
 }
 
+// Uses UART to get new WiFi credentials
 async fn create_new_wifi_config(
 	uart: &mut AsyncUartDriver<'static, UartDriver<'static>>,
 	nvs: &mut EspNvs<NvsDefault>
@@ -428,7 +437,7 @@ async fn get_current_wifi_config(
 	}
 }
 
-// Ownership of Wi-Fi is shared with the main thread. If main panics then this
+// Ownership of WiFi is shared with the main thread. If main panics then this
 // task will end, so the mutex will never be poisoned in this task, and
 // therefore unwraps are safe to use on them.
 #[allow(clippy::unwrap_used)]
@@ -439,8 +448,7 @@ pub async fn run_wifi(
 	mut nvs: EspNvs<NvsDefault>,
 	is_connected: Rc<Cell<bool>>
 ) -> ! {
-	// Setup Wi-Fi until success
-
+	// Get WiFi config or create a new one until one exists
 	loop {
 		match get_current_wifi_config(&wifi).await {
 			Some(_) => debug!("Previous WiFi config found"),
@@ -471,6 +479,7 @@ pub async fn run_wifi(
 
 	info!("WiFi started");
 
+	// Connect to WiFi or change config forever
 	loop {
 		is_connected.set(false);
 		// Get existing config or create a new one
@@ -598,6 +607,7 @@ pub async fn run_wifi(
 					wifi.wifi().sta_netif().get_ip_info()
 				);
 
+				// Wait until disconnect
 				if let Err(err) = wifi.wifi_wait(|wifi| wifi.is_connected(), None).await {
 					error!("Failed to wait for disconnection ({err}); reconnecting");
 					continue;

@@ -79,9 +79,12 @@ async fn uart_read_line(
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+	// These need to be called for esp_idf
 	esp_idf_svc::sys::link_patches();
 	esp_idf_svc::log::init(LevelFilter::Debug);
 
+	// This is optional, but I use it to add a delay before the reboot (delay is
+	// watchdog timeout time)
 	panic::set_hook(Box::new(panic));
 
 	info!("starting...");
@@ -95,6 +98,7 @@ async fn main(spawner: Spawner) {
 	let timer_service = EspTaskTimerService::new()
 		.unwrap_or_else(|err| panic!("Failed to create task timer service ({err})"));
 
+	// This is just debug lights for now, they don't do anything yet
 	let led_channel_config = TxChannelConfig {
 		resolution: Hertz(10_000_000),
 		memory_access: MemoryAccess::Indirect {
@@ -114,6 +118,7 @@ async fn main(spawner: Spawner) {
 		])
 		.unwrap();
 
+	// Create the SPI interfaces
 	let spi2 = SpiDriver::new(
 		peripherals.spi2,
 		peripherals.pins.gpio14,
@@ -134,8 +139,7 @@ async fn main(spawner: Spawner) {
 
 	debug!("Gotten ESP services");
 
-	debug!("Created display");
-
+	// Make the UART driver
 	let uart_tx_pin = peripherals.pins.gpio1;
 	let uart_rx_pin = peripherals.pins.gpio3;
 
@@ -152,6 +156,7 @@ async fn main(spawner: Spawner) {
 	)
 	.unwrap_or_else(|err| panic!("Failed to create UART driver ({err})"));
 
+	// Make WiFi driver
 	let wifi = AsyncWifi::wrap(
 		EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs.clone()))
 			.unwrap_or_else(|err| panic!("Failed to create inner WiFi driver ({err})")),
@@ -163,11 +168,29 @@ async fn main(spawner: Spawner) {
 	let wifi_nvs_partition = EspNvs::new(nvs, "wifi", true).expect("Failed to get NVS namespace");
 	let wifi_is_connected = Rc::new(Cell::new(false));
 
+	// Create the HTTP config
 	let http_config = HTTPConfiguration {
 		crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
 		..Default::default()
 	};
 
+	// Create a new async embassy task for WiFi.
+	spawner.spawn(
+		run_wifi(
+			wifi,
+			uart_driver,
+			wifi_nvs_partition,
+			wifi_is_connected.clone()
+		)
+		.unwrap_or_else(|err| panic!("Failed to obtain WiFi task token ({err})"))
+	);
+
+	// Wait for WiFi to be connected. todo make loading screen
+	while !wifi_is_connected.get() {
+		Timer::after_millis(100).await;
+	}
+
+	// Create a new async embassy task for the LCD.
 	spawner.spawn(
 		run_lcd(
 			http_config,
@@ -184,18 +207,12 @@ async fn main(spawner: Spawner) {
 		.unwrap_or_else(|err| panic!("Failed to obtain LCD task token ({err})"))
 	);
 
+	// The PCB has the backlight pin on gpio 25, so I just drive it high for now.
 	let mut lcd_led = PinDriver::output(peripherals.pins.gpio25).unwrap();
-	lcd_led.set_high();
+	lcd_led
+		.set_high()
+		.expect("Failed to drive LCD backlight high");
 
-	spawner.spawn(
-		run_wifi(
-			wifi,
-			uart_driver,
-			wifi_nvs_partition,
-			wifi_is_connected.clone()
-		)
-		.unwrap_or_else(|err| panic!("Failed to obtain WiFi task token ({err})"))
-	);
 	info!("Completed setup");
 
 	loop {

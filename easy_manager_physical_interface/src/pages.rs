@@ -1,8 +1,6 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use crate::graphics::{Theme, Unipage, WidgetFactory};
-use crate::lcd::InteractableDisplay;
 use cstr_core::{CString, cstr};
 use easy_manager_core::PermissionLevel;
 use easy_manager_core::packets::Packet;
@@ -12,7 +10,14 @@ use easy_manager_core::packets::get::{
 	GetUserInfoResponse,
 	GetUsersResponse
 };
-use easy_manager_core::packets::post::{BorrowRequest, LoginResponse, LoginUsingPermanentTokenRequest, ObtainPermanentTokenRequest, ObtainPermanentTokenResponse, ReturnRequest};
+use easy_manager_core::packets::post::{
+	BorrowRequest,
+	LoginResponse,
+	LoginUsingPermanentTokenRequest,
+	ObtainPermanentTokenRequest,
+	ObtainPermanentTokenResponse,
+	ReturnRequest
+};
 use embedded_svc::http::Method;
 use esp_idf_sys::esp_restart;
 use log::error;
@@ -29,6 +34,9 @@ use lvgl::sys::{
 use lvgl::widgets::{Btn, Label, List, Switch};
 use lvgl::{Align, Event, LvResult, NativeObject, Obj, Screen, Widget};
 use uuid::Uuid;
+
+use crate::graphics::{Theme, Unipage, WidgetFactory};
+use crate::lcd::InteractableDisplay;
 
 const USER_TYPE: [u8; 16] = *b"USER\0\0\0\0\0\0\0\0\0\0\0\0";
 const ITEM_TYPE: [u8; 16] = *b"ITEM\0\0\0\0\0\0\0\0\0\0\0\0";
@@ -122,7 +130,7 @@ pub fn home_page(
 				}
 			}
 		})?;
-		
+
 		let mut view_inventory_button =
 			wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
 				let mut label = wf.create_widget(Label::create)?;
@@ -147,8 +155,7 @@ pub fn home_page(
 					match Unipage::try_new(theme, display, |wf, theme, display| {
 						err_page(
 							0,
-							format!("Failed to create inventory viewer page ({err:?})")
-								.as_str(),
+							format!("Failed to create inventory viewer page ({err:?})").as_str(),
 							wf,
 							theme,
 							display
@@ -231,7 +238,9 @@ pub fn login_page(
 											Packet::Ok(..) => {
 												let mut label = wf.create_widget(Label::create)?;
 												theme.primary_label(&mut label);
-												label.set_text_static(cstr!("Waiting for server..."));
+												label.set_text_static(cstr!(
+													"Waiting for server..."
+												));
 												label.set_width(percent(100));
 												label.set_align(Align::TopMid, 0, 0);
 												Unipage::try_new_with_http(
@@ -403,7 +412,7 @@ pub fn main_page(
 										label.set_width(percent(100));
 										label.set_align(Align::Center, 0, 0);
 										theme.primary_label(&mut label);
-										
+
 										let mut ok_button = wf.create_parent_widget(
 											Btn::create,
 											theme,
@@ -483,13 +492,7 @@ pub fn main_page(
 			return err_page(code, err.message.as_str(), wf, theme, display);
 		}
 		Packet::None(code) => {
-			return err_page(
-				code,
-				"unexpected empty packet",
-				wf,
-				theme,
-				display
-			);
+			return err_page(code, "unexpected empty packet", wf, theme, display);
 		}
 	}
 
@@ -682,7 +685,7 @@ fn confirm_borrow(
 					})?;
 				theme.primary_button(&mut borrow_button);
 				borrow_button.set_width(percent(100));
-				
+
 				let mut borrow_closure = |item_id: &str| {
 					Unipage::try_new_with_http(
 						Method::Post,
@@ -701,7 +704,7 @@ fn confirm_borrow(
 									label.set_width(percent(100));
 									label.set_align(Align::Center, 0, 0);
 									theme.primary_label(&mut label);
-									
+
 									let mut ok_button = wf.create_parent_widget(
 										Btn::create,
 										theme,
@@ -735,9 +738,9 @@ fn confirm_borrow(
 						},
 						http_loading_screen
 					)
-						.unwrap();
+					.unwrap();
 				};
-				
+
 				borrow_button.on_event(move |_, e| {
 					if let Event::Clicked = e {
 						borrow_closure(packet.item_id.as_str())
@@ -749,13 +752,7 @@ fn confirm_borrow(
 			err_page(code, err.message.as_str(), wf, theme, display)?;
 		}
 		Packet::None(code) => {
-			return err_page(
-				code,
-				"unexpected empty packet",
-				wf,
-				theme,
-				display
-			);
+			return err_page(code, "unexpected empty packet", wf, theme, display);
 		}
 	}
 
@@ -826,13 +823,7 @@ fn view_inventory_page(
 			err_page(code, err.message.as_str(), wf, theme, display)?;
 		}
 		Packet::None(code) => {
-			return err_page(
-				code,
-				"unexpected empty packet",
-				wf,
-				theme,
-				display
-			);
+			return err_page(code, "unexpected empty packet", wf, theme, display);
 		}
 	}
 
@@ -1071,13 +1062,7 @@ fn program_item_page(
 			err_page(code, err.message.as_str(), wf, theme, display)?;
 		}
 		Packet::None(code) => {
-			return err_page(
-				code,
-				"unexpected empty packet",
-				wf,
-				theme,
-				display
-			);
+			return err_page(code, "unexpected empty packet", wf, theme, display);
 		}
 	}
 
@@ -1208,13 +1193,7 @@ fn program_user_page(
 			err_page(code, err.message.as_str(), wf, theme, display)?;
 		}
 		Packet::None(code) => {
-			return err_page(
-				code,
-				"unexpected empty packet",
-				wf,
-				theme,
-				display
-			);
+			return err_page(code, "unexpected empty packet", wf, theme, display);
 		}
 	}
 	Ok(())
@@ -1270,13 +1249,7 @@ fn program_obtained_permanent_token(
 			err_page(code, err.message.as_str(), wf, theme, display)?;
 		}
 		Packet::None(code) => {
-			return err_page(
-				code,
-				"unexpected empty packet",
-				wf,
-				theme,
-				display
-			);
+			return err_page(code, "unexpected empty packet", wf, theme, display);
 		}
 	}
 
