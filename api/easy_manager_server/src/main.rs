@@ -89,6 +89,7 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> From<Packet<T>> for Resp
 	}
 }
 
+/// Makes sure that a user is logged into a valid session
 #[tracing::instrument]
 async fn auth_middleware(
 	state: State<DatabaseConnection>,
@@ -182,10 +183,11 @@ async fn auth_middleware(
 	};
 	// Pass the session to the endpoint as an extension
 	req.extensions_mut().insert(session);
-	
+
 	next.run(req).await
 }
 
+/// Makes sure that the packet is coming from a valid client
 #[tracing::instrument]
 pub fn validate_packet(headers: &axum::http::HeaderMap) -> Result<(), PacketError> {
 	let client_version: &axum::http::HeaderValue = headers
@@ -285,7 +287,7 @@ async fn main() -> Result<(), EasyManagerError> {
 			"/obtain_permanent_token",
 			method_routing::post(endpoints::obtain_permanent_token),
 		)
-		.route("/borrow", method_routing::post(endpoints::borrow))
+		.route("/borrow", method_routing::post(endpoints::borrow_item))
 		.layer(middleware::from_fn_with_state(
 			db_connection.clone(),
 			auth_middleware,

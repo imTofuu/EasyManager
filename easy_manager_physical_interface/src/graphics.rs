@@ -37,6 +37,10 @@ use serde::de::DeserializeOwned;
 use crate::communications::{HttpPromise, RfidPromise};
 use crate::lcd::InteractableDisplay;
 
+/// Wraps LVGL styles because when applying themes you need a &mut reference
+/// borrowed for as long as the widget exists. If I make widgets be applied to
+/// themes instead of themes being applied to widgets, I can not give out the
+/// multiple mutable references
 pub struct StyleCell {
 	inner: UnsafeCell<Style>
 }
@@ -49,12 +53,15 @@ impl StyleCell {
 	}
 
 	pub fn apply<'a, P, W: Widget<'a, Part = P>>(&'a self, part: P, widget: &mut W) {
-		// SAFETY: The style is owned by StyleCell which means that rust can no longer
-		// mutate it, only LVGL
+		// SAFETY: The style is private inside StyleCell which means that rust can no
+		// longer mutate it, only LVGL
 		widget.add_style(part, unsafe { self.inner.as_mut_unchecked() });
 	}
 }
 
+/// This is similar to StyleCell but allows the inner to be directly got as an
+/// lv_style_t so I can call the raw bindings on it in case something isn't
+/// exposed in a Rust binding
 pub struct RawStyleCell {
 	inner: UnsafeCell<lv_style_t>
 }
@@ -75,8 +82,10 @@ impl RawStyleCell {
 	}
 }
 
+/// Creates widgets and automatically sets the parent
 pub struct WidgetFactory<'p, P: NativeObject + 'p>(&'p mut P);
 impl<'p, P: NativeObject> WidgetFactory<'p, P> {
+	/// Create a widget with the inner as the parent
 	pub fn create_widget<'a, W: Widget<'a>>(
 		&'a mut self,
 		constr: impl FnOnce(&'a mut P) -> LvResult<W>
@@ -84,6 +93,8 @@ impl<'p, P: NativeObject> WidgetFactory<'p, P> {
 		constr(self.0)
 	}
 
+	/// Create a widget with the inner as the parent and create a WidgetFactory
+	/// for the new widget
 	pub fn create_parent_widget<'a, W: Widget<'a>, T: Theme>(
 		&'a mut self,
 		constr: impl FnOnce(&'a mut P) -> LvResult<W>,
@@ -97,13 +108,14 @@ impl<'p, P: NativeObject> WidgetFactory<'p, P> {
 	}
 }
 
+/// LVGL screen with a group so each screen has its own group which makes it
+/// easier to manage
 pub struct Unipage<'a> {
 	inner: Screen<'a>,
 	group: *mut lv_group_t
 }
 
 impl<'a> Unipage<'a> {
-	/// It is UB to drop the Unipage instance from init
 	pub fn try_new<T: Theme>(
 		theme: &'static T,
 		display: &mut InteractableDisplay,
@@ -129,6 +141,8 @@ impl<'a> Unipage<'a> {
 	}
 
 	// THIS AUTOMATICALLY PUSHES THE PAGE; i will change it at some point
+	/// Creates an HTTP promise that wraps the promise with some automatic page
+	/// handling
 	pub fn try_new_with_http<
 		T: Theme,
 		B: Serialize + Send + 'static,
@@ -181,6 +195,8 @@ impl<'a> Unipage<'a> {
 	}
 
 	// THIS AUTOMATICALLY PUSHES THE PAGE; i will change it at some point
+	/// Creates an RFID read promise that wraps the promise with some automatic
+	/// page handling
 	pub fn try_new_with_rfid_read<T: Theme>(
 		blocks: Range<u8>,
 		theme: &'static T,
@@ -214,6 +230,8 @@ impl<'a> Unipage<'a> {
 		Ok(())
 	}
 
+	/// Creates an RFID write promise that wraps the promise with some automatic
+	/// page handling
 	pub fn try_new_with_rfid_write<T: Theme>(
 		data: Vec<(u8, [u8; 16])>,
 		default: bool,
@@ -252,6 +270,8 @@ impl<'a> Unipage<'a> {
 	// Shouldn't be called normally, will be removed at some point
 	#[deprecated]
 	pub fn screen(&mut self) -> &'a mut Screen<'_> { &mut self.inner }
+
+	// Called when making the screen active
 	pub fn make_group_active(&self, indev: *mut lv_indev_t) {
 		unsafe { lv_indev_set_group(indev, self.group) }
 	}
@@ -302,7 +322,6 @@ pub struct ModernTheme {
 	pub option_container: StyleCell,
 
 	pub switch:           StyleCell,
-	//pub switch_hover: RawStyleCell,
 	pub switch_indicator: RawStyleCell,
 	pub switch_knob:      StyleCell,
 

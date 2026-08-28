@@ -115,7 +115,7 @@ pub fn home_page(
 	theme.primary_label(&mut title);
 
 	let mut list = wf.create_parent_widget(List::create, theme, |mut wf, theme| {
-		let mut login_button = wf.create_parent_widget(Btn::create, theme, |mut wf, theme| {
+		let mut login_button = wf.create_parent_widget(Btn::create, theme, |mut wf, _theme| {
 			let mut label = wf.create_widget(Label::create)?;
 			label.set_text_static(cstr!("Login"));
 			Ok(())
@@ -558,7 +558,7 @@ fn borrow_page(
 						vec![],
 						theme,
 						display,
-						confirm_borrow,
+						confirm_borrow_page,
 						http_loading_screen
 					)?;
 				}
@@ -574,7 +574,7 @@ fn borrow_page(
 	Ok(())
 }
 
-fn confirm_borrow(
+fn confirm_borrow_page(
 	packet: Packet<GetItemInfoResponse>,
 	mut wf: WidgetFactory<Screen>,
 	theme: &'static impl Theme,
@@ -775,7 +775,7 @@ fn view_inventory_page(
 			let mut list = wf.create_parent_widget(List::create, theme, |mut wf, theme| {
 				for item in packet.items {
 					let mut container =
-						wf.create_parent_widget(Obj::create, theme, |mut wf, theme| {
+						wf.create_parent_widget(Obj::create, theme, |mut wf, _theme| {
 							let mut name = wf.create_widget(Label::create)?;
 							name.set_text(
 								CString::new(item.name)

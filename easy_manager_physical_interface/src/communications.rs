@@ -35,7 +35,6 @@ use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use crate::lcd::InteractableDisplay;
-use crate::uart_read_line;
 
 pub type HttpWorkResult = Result<(u16, Option<Option<Uuid>>, Vec<u8>), ErrorPacket>;
 pub type HttpWork =
@@ -43,6 +42,8 @@ pub type HttpWork =
 pub type HttpPromiseClosure =
 	dyn FnOnce(Result<(u16, Vec<u8>), ErrorPacket>, &mut InteractableDisplay);
 
+/// Holds 2 closures that are used to create a "call this when the work is done"
+/// object
 pub struct HttpPromise {
 	pub work: Box<HttpWork>,
 	pub done: Box<HttpPromiseClosure>
@@ -61,7 +62,6 @@ impl HttpPromise {
 				move |http: &mut Client<EspHttpConnection>,
 				      session_id: &Option<Uuid>|
 				      -> HttpWorkResult {
-					
 					// Serialise body
 					let body_json = match body {
 						Some(body) => {
@@ -95,7 +95,7 @@ impl HttpPromise {
 						.iter()
 						.map(|(k, v)| (k.as_str(), v.as_str()))
 						.collect();
-					
+
 					let mut req = match http.request(method, uri.as_str(), hdrs.as_slice()) {
 						Ok(req) => req,
 						Err(err) => {
@@ -209,6 +209,8 @@ pub type RfidWriteResult = Result<bool, Error<SpiError>>;
 pub type RfidWritePromise =
 	Box<dyn FnOnce(Result<(), Error<SpiError>>, &mut InteractableDisplay) + 'static>;
 
+/// Holds 2 closures that are used to create a "call this when the work is done"
+/// object with different variants for the type of work that has to be done.
 pub enum RfidPromise {
 	Read(
 		Box<
@@ -229,6 +231,7 @@ pub enum RfidPromise {
 }
 
 impl RfidPromise {
+	/// Creates a promise of the Read variant
 	pub fn read<'a>(blocks: Range<u8>, promise_closure: RfidReadPromise) -> Self {
 		Self::Read(
 			Box::new(move |rfid| rfid.reqa_collect_data(blocks.clone())),
@@ -236,6 +239,7 @@ impl RfidPromise {
 		)
 	}
 
+	/// Creates a promise of the Write variant
 	pub fn write(
 		data: Vec<(u8, [u8; 16])>,
 		default: bool,
@@ -250,6 +254,7 @@ impl RfidPromise {
 
 type RfidInner<'s, SPI, T> = Mfrc522<SpiInterface<SpiDeviceDriver<'s, SPI>, DummyDelay>, T>;
 
+/// Mfrc RFID reader with a callback that is used to get auth keys
 pub struct RfidReader<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> MifareKey> {
 	inner:  RfidInner<'s, SPI, Initialized>,
 	key_cb: K
@@ -271,6 +276,7 @@ impl<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> MifareKey> RfidRead
 		Ok(Self { inner, key_cb })
 	}
 
+	/// Gets data from some contiguous blocks
 	pub fn reqa_collect_data(
 		&mut self,
 		blocks: Range<u8>
@@ -292,6 +298,7 @@ impl<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> MifareKey> RfidRead
 		Ok(Some(out))
 	}
 
+	/// Writes data to blocks
 	pub fn reqa_write_data(
 		&mut self,
 		data: impl IntoIterator<Item = (u8, [u8; 16])> + Clone,
@@ -336,12 +343,43 @@ impl<'s, SPI: Borrow<SpiDriver<'s>> + 's, K: Fn(&Uid, u8) -> MifareKey> RfidRead
 		Ok(true)
 	}
 
+	/// Gets the key for a block by getting the sector of the block and calling
+	/// the object's key callback
 	fn get_auth_for_block(&self, uid: &Uid, block: u8) -> MifareKey {
 		self.key_cb.call((uid, block / 4))
 	}
 }
 
-// Uses UART to get new WiFi credentials
+async fn uart_read_line(
+	uart: &mut AsyncUartDriver<'static, UartDriver<'static>>,
+	echo: bool
+) -> cstr_core::CString {
+	let mut result: Result<cstr_core::CString, ()> = Err(());
+	while let Err(()) = result {
+		let mut string = Vec::new();
+		loop {
+			let mut char = [0u8; 1];
+			uart.read(&mut char)
+				.await
+				.unwrap_or_else(|err| panic!("Failed to read from uart({err})"));
+			match char[0] {
+				b'\n' | b'\r' => break,
+				c => {
+					string.push(c);
+					if echo {
+						uart.write(&char)
+							.await
+							.unwrap_or_else(|err| panic!("Failed to echo char in UART ({err})"));
+					}
+				}
+			}
+		}
+		result = cstr_core::CString::new(string).map_err(|_| ());
+	}
+	result.unwrap()
+}
+
+/// Uses UART to get new WiFi credentials
 async fn create_new_wifi_config(
 	uart: &mut AsyncUartDriver<'static, UartDriver<'static>>,
 	nvs: &mut EspNvs<NvsDefault>
@@ -406,8 +444,8 @@ async fn create_new_wifi_config(
 		match uart_read_line(uart, false).await.to_str() {
 			Ok(input) => {
 				match input.try_into() {
-					Ok(s32_password) => {
-						wifi_config.password = s32_password;
+					Ok(s64_password) => {
+						wifi_config.password = s64_password;
 						break;
 					}
 					Err(_) => error!("Password is too long")
@@ -440,6 +478,7 @@ async fn get_current_wifi_config(
 // Ownership of WiFi is shared with the main thread. If main panics then this
 // task will end, so the mutex will never be poisoned in this task, and
 // therefore unwraps are safe to use on them.
+/// Main WiFi task that runs forever, keeping the ESP connected
 #[allow(clippy::unwrap_used)]
 #[embassy_executor::task]
 pub async fn run_wifi(

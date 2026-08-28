@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::ffi::{c_int, c_void};
-use std::io::Read;
 use std::mem::transmute;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -11,7 +10,6 @@ use anyhow::Context;
 use arrayvec::ArrayVec;
 use easy_manager_core::packets::ErrorPacket;
 use embassy_time::Timer;
-use embedded_sdmmc::{BlockDevice, File, TimeSource, Timestamp};
 use embedded_svc::http::client::Client;
 use esp_idf_hal::gpio::{
 	AnyInputPin,
@@ -21,9 +19,7 @@ use esp_idf_hal::gpio::{
 	InterruptType,
 	Level,
 	OutputPin,
-	Pin,
 	PinDriver,
-	PinId,
 	Pull
 };
 use esp_idf_hal::spi::SpiDriver;
@@ -47,7 +43,8 @@ use esp_idf_sys::{
 	esp_lcd_spi_bus_handle_t,
 	gpio_num_t,
 	lcd_rgb_data_endian_t_LCD_RGB_DATA_ENDIAN_LITTLE,
-	lcd_rgb_element_order_t_LCD_RGB_ELEMENT_ORDER_BGR};
+	lcd_rgb_element_order_t_LCD_RGB_ELEMENT_ORDER_BGR
+};
 use log::{debug, error, info};
 use lvgl::sys::{
 	_lv_indev_drv_t,
@@ -68,65 +65,7 @@ use crate::communications::{HttpPromise, HttpWork, RfidPromise, RfidReader};
 use crate::graphics::{ModernTheme, Unipage};
 use crate::pages::home_page;
 
-pub struct SPIPinDriver<'d, MODE>(PinDriver<'d, MODE>);
-
-impl<'d, MODE> SPIPinDriver<'d, MODE> {
-	pub fn new(pin_driver: PinDriver<'d, MODE>) -> Self { Self(pin_driver) }
-}
-
-impl<'d, MODE> Pin for SPIPinDriver<'d, MODE> {
-	fn pin(&self) -> PinId { self.0.pin() }
-}
-
-impl<'d, MODE> OutputPin for SPIPinDriver<'d, MODE> {}
-
-pub struct DummyTimesource();
-
-impl TimeSource for DummyTimesource {
-	#[allow(clippy::unwrap_used)]
-	fn get_timestamp(&self) -> Timestamp { Timestamp::from_calendar(1970, 1, 1, 0, 0, 0).unwrap() }
-}
-
-pub struct ReadableFile<
-	'a,
-	D: BlockDevice,
-	T: TimeSource,
-	const MAX_DIRS: usize,
-	const MAX_FILES: usize,
-	const MAX_VOLUMES: usize
->(File<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>);
-
-impl<
-	'a,
-	D: BlockDevice,
-	T: TimeSource,
-	const MAX_DIRS: usize,
-	const MAX_FILES: usize,
-	const MAX_VOLUMES: usize
-> ReadableFile<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
-{
-	pub fn new(inner: File<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>) -> Self { Self(inner) }
-}
-
-impl<
-	'a,
-	D: BlockDevice,
-	T: TimeSource,
-	const MAX_DIRS: usize,
-	const MAX_FILES: usize,
-	const MAX_VOLUMES: usize
-> Read for ReadableFile<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
-{
-	fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-		self.0.read(buf).map_err(|_| todo!())
-	}
-}
-
-pub enum ImageDrawError {
-	IOError(std::io::Error),
-	DrawError()
-}
-
+/// Groups the logic for drawing to and interacting with a display
 pub struct InteractableDisplay {
 	display:    Display,
 	page_stack: ArrayVec<Box<Unipage<'static>>, 64>,
@@ -167,7 +106,7 @@ impl InteractableDisplay {
 			.unwrap_or_else(|err| panic!("Failed to make rotary encoder SW pin driver ({err})"));
 
 		let sw_id = sw.pin();
-		
+
 		// Make encoder interrupts
 		unsafe {
 			clk.subscribe(move || {
@@ -341,7 +280,7 @@ impl InteractableDisplay {
 	}
 }
 
-// This is the function the fulfiller thread is on to do HTTP requests
+/// This is the function the fulfiller thread is on to do HTTP requests
 fn request_fulfiller(
 	http_config: Configuration,
 	req: Arc<Mutex<Option<Box<HttpWork>>>>,
@@ -356,7 +295,7 @@ fn request_fulfiller(
 		if res.lock().unwrap().is_some() {
 			continue;
 		}
-		
+
 		let req = req.lock().unwrap().take();
 		if let Some(req) = req {
 			let mut http = Client::wrap(
@@ -370,13 +309,14 @@ fn request_fulfiller(
 				}
 				(code, data)
 			});
-			
+
 			// Put response
 			*res.lock().unwrap() = Some(data);
 		}
 	}
 }
 
+/// Updates LVGL and promise tasks forever
 #[embassy_executor::task]
 pub async fn run_lcd(
 	http_config: Configuration,

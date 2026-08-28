@@ -18,7 +18,6 @@ use std::panic;
 use std::panic::PanicHookInfo;
 use std::rc::Rc;
 
-use cstr_core::CString;
 use embassy_executor::Spawner;
 use embassy_time::Timer;
 use esp_idf_hal::gpio::PinDriver;
@@ -29,10 +28,9 @@ use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::hal::spi::SpiDriver;
 use esp_idf_svc::hal::spi::config::DriverConfig;
 use esp_idf_svc::hal::uart::config::Config;
-use esp_idf_svc::hal::uart::{AsyncUartDriver, UartDriver};
+use esp_idf_svc::hal::uart::AsyncUartDriver;
 use esp_idf_svc::hal::units::Hertz;
 use esp_idf_svc::http::client::Configuration as HTTPConfiguration;
-use esp_idf_svc::io::asynch::{Read, Write};
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs};
 use esp_idf_svc::timer::EspTaskTimerService;
 use esp_idf_svc::wifi::{AsyncWifi, EspWifi};
@@ -46,35 +44,6 @@ use crate::lcd::run_lcd;
 fn panic(panic_info: &PanicHookInfo) {
 	error!("Panicked:  {panic_info}");
 	loop {}
-}
-
-async fn uart_read_line(
-	uart: &mut AsyncUartDriver<'static, UartDriver<'static>>,
-	echo: bool
-) -> CString {
-	let mut result: Result<CString, ()> = Err(());
-	while let Err(()) = result {
-		let mut string = Vec::new();
-		loop {
-			let mut char = [0u8; 1];
-			uart.read(&mut char)
-				.await
-				.unwrap_or_else(|err| panic!("Failed to read from uart({err})"));
-			match char[0] {
-				b'\n' | b'\r' => break,
-				c => {
-					string.push(c);
-					if echo {
-						uart.write(&char)
-							.await
-							.unwrap_or_else(|err| panic!("Failed to echo char in UART ({err})"));
-					}
-				}
-			}
-		}
-		result = CString::new(string).map_err(|_| ());
-	}
-	result.unwrap()
 }
 
 #[embassy_executor::main]

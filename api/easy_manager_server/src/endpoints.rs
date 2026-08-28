@@ -852,7 +852,7 @@ pub async fn login_using_permanent_token(
 	)
 }
 
-//todo add auth
+/// Permanent tokens are written to RFID tags so they can be used to identify users forever
 #[tracing::instrument]
 pub async fn obtain_permanent_token(
 	state: State<DatabaseConnection>,
@@ -883,7 +883,7 @@ pub async fn obtain_permanent_token(
 			if session_user.permission_level >= PermissionLevel::Admin {
 				match Uuid::try_parse(user_id.as_str()) {
 					Ok(uuid) => uuid,
-					Err(err) => {
+					Err(_) => {
 						tracing::error!("Passed auth middleware but invalid user id");
 						return (
 							StatusCode::INTERNAL_SERVER_ERROR,
@@ -965,7 +965,7 @@ pub async fn obtain_permanent_token(
 }
 
 #[tracing::instrument]
-pub async fn borrow(
+pub async fn borrow_item(
 	state: State<DatabaseConnection>,
 	Extension(session): Extension<session::Model>,
 	Json(borrow_request): Json<BorrowRequest>,
